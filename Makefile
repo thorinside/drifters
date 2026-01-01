@@ -1,4 +1,4 @@
-# Makefile for Drift Engine distingNT Plugin
+# Makefile for Drifters distingNT Plugin
 #
 # Usage:
 #   make hardware    - Build for distingNT hardware (.o file)
@@ -10,8 +10,8 @@
 # PROJECT CONFIGURATION
 # ============================================================================
 
-PLUGIN_NAME = drift_engine
-SOURCES = drift_engine.cpp
+PLUGIN_NAME = drifters
+SOURCES = drifters.cpp
 
 # Detect platform
 UNAME_S := $(shell uname -s)
@@ -131,8 +131,8 @@ clean:
 	@echo "Cleaned build and output directories"
 
 help:
-	@echo "Drift Engine - distingNT Plugin Build System"
-	@echo "============================================="
+	@echo "Drifters - distingNT Plugin Build System"
+	@echo "========================================="
 	@echo ""
 	@echo "Targets:"
 	@echo "  hardware    - Build for distingNT hardware (.o)"
@@ -149,6 +149,6 @@ help:
 	@echo ""
 	@echo "Deployment:"
 	@echo "  1. make hardware"
-	@echo "  2. Copy plugins/drift_engine.o to distingNT SD card"
+	@echo "  2. Copy plugins/drifters.o to distingNT SD card"
 
 .PHONY: all hardware test both check size clean help

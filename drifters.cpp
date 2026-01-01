@@ -1,5 +1,5 @@
 /*
- * Drift Engine - Granular Sample Explorer for distingNT
+ * Drifters - Granular Sample Explorer for distingNT
  *
  * "Build ambient worlds from frozen moments"
  *
@@ -7,9 +7,9 @@
  * frequency band and stereo position. Poisson-triggered grains
  * create organic, evolving ambient worlds.
  *
- * Developer: Ns (nealsanche)
+ * Developer: Thorinside (Neal Sanche)
  * Plugin ID: Dr (Drift)
- * GUID: NsDr
+ * GUID: ThDr
  */
 
 #include <distingnt/api.h>
@@ -1089,7 +1089,7 @@ bool draw(_NT_algorithm* self) {
     _driftEngine_DRAM* dram = pThis->dram;
 
     // Title
-    NT_drawText(10, 10, "DRIFT ENGINE", 15, kNT_textLeft, kNT_textNormal);
+    NT_drawText(10, 10, "DRIFTERS", 15, kNT_textLeft, kNT_textNormal);
 
     // Get folder/sample info directly from API (like sample player example)
     int folder = pThis->v[kParamFolder];
@@ -1344,8 +1344,8 @@ void setupUi(_NT_algorithm* self, _NT_float3& pots) {
 // ============================================================================
 
 static const _NT_factory factory = {
-    .guid = NT_MULTICHAR('N', 's', 'D', 'r'),  // Nealsanche + Drift
-    .name = "Drift Engine",
+    .guid = NT_MULTICHAR('T', 'h', 'D', 'r'),  // Thorinside + Drift
+    .name = "Drifters",
     .description = "Granular sample explorer - 4 autonomous drifters",
     .numSpecifications = 0,
     .specifications = NULL,
