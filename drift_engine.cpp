@@ -379,6 +379,8 @@ struct _driftEngineAlgorithm : public _NT_algorithm {
     bool awaitingCallback;
     bool initialized;          // Set after construct completes
     bool pendingSampleLoad;    // Deferred sample load request
+    int32_t pendingSampleLength; // Length of sample being loaded
+    float pendingSampleRateRatio; // Sample rate ratio of sample being loaded
     float sampleRateRatio;     // Source sample rate / device sample rate
 
     // Cached values from parameters
@@ -419,8 +421,11 @@ static inline float randFloat(_driftEngine_DTC* dtc) {
 
 // Find nearest zero crossing in sample buffer
 static int findNearestZeroCrossing(const float* buffer, int startPos, int sampleLen, int searchRadius = 64) {
-    int bestPos = startPos;
-    float bestVal = fabsf(buffer[startPos % sampleLen]);
+    // Guard against division by zero
+    if (sampleLen <= 0) return 0;
+
+    int bestPos = startPos % sampleLen;
+    float bestVal = fabsf(buffer[bestPos]);
 
     for (int offset = 1; offset <= searchRadius; offset++) {
         // Search forward
@@ -568,15 +573,19 @@ static void wavLoadCallback(void* callbackData, bool success) {
     pThis->awaitingCallback = false;
 
     if (success) {
+        // Apply the pending sample info now that load is complete
+        pThis->dram->sampleLength = pThis->pendingSampleLength;
+        pThis->sampleRateRatio = pThis->pendingSampleRateRatio;
         pThis->dram->sampleLoaded = true;
     }
 }
 
 // Helper to initiate sample loading (like sample player example)
-static void loadSample(_driftEngineAlgorithm* pThis) {
+// Returns true if load was initiated, false if conditions not met
+static bool loadSample(_driftEngineAlgorithm* pThis) {
     // Don't try to load during construction or if card not mounted
     if (!pThis->initialized || !NT_isSdCardMounted()) {
-        return;
+        return false;
     }
 
     int folder = pThis->v[kParamFolder];
@@ -587,14 +596,9 @@ static void loadSample(_driftEngineAlgorithm* pThis) {
     NT_getSampleFileInfo(folder, sample, info);
 
     if (info.numFrames == 0) {
-        pThis->dram->sampleLoaded = false;
-        pThis->dram->sampleLength = 0;
-        return;
+        // No valid sample - keep playing whatever was loaded before
+        return false;
     }
-
-    // Store sample rate ratio for pitch correction
-    pThis->sampleRateRatio = (float)info.sampleRate / NT_globals.sampleRate;
-    pThis->dram->sampleIsStereo = (info.channels == kNT_WavStereo);
 
     // Limit to our buffer size
     uint32_t framesToRead = info.numFrames;
@@ -602,8 +606,11 @@ static void loadSample(_driftEngineAlgorithm* pThis) {
         framesToRead = kMaxSampleFrames;
     }
 
-    pThis->dram->sampleLength = framesToRead;
-    pThis->dram->sampleLoaded = false;  // Will be set true in callback
+    // Store pending values - will be applied in callback when load completes
+    // This keeps the old sample playing until the new one is ready
+    pThis->pendingSampleLength = framesToRead;
+    pThis->pendingSampleRateRatio = (float)info.sampleRate / NT_globals.sampleRate;
+    pThis->dram->sampleIsStereo = (info.channels == kNT_WavStereo);
 
     // Prepare the request (like sample player example)
     // Always request mono - the granular engine adds stereo spread via panning
@@ -620,7 +627,9 @@ static void loadSample(_driftEngineAlgorithm* pThis) {
 
     if (NT_readSampleFrames(pThis->wavRequest)) {
         pThis->awaitingCallback = true;
+        return true;
     }
+    return false;
 }
 
 _NT_algorithm* construct(const _NT_algorithmMemoryPtrs& ptrs,
@@ -692,6 +701,8 @@ _NT_algorithm* construct(const _NT_algorithmMemoryPtrs& ptrs,
     alg->awaitingCallback = false;
     alg->initialized = false;
     alg->pendingSampleLoad = false;
+    alg->pendingSampleLength = 0;
+    alg->pendingSampleRateRatio = 1.0f;
     alg->sampleRateRatio = 1.0f;
 
     // Initialize cached values
@@ -799,28 +810,29 @@ void step(_NT_algorithm* self, float* busFrames, int numFramesBy4) {
 #ifdef DISTING_HARDWARE
             NT_updateParameterDefinition(NT_algorithmIndex(self), kParamFolder);
 #endif
-            // Also update sample max for current folder and load the sample
+            // Also update sample max for current folder
             _NT_wavFolderInfo folderInfo;
             NT_getSampleFolderInfo(pThis->v[kParamFolder], folderInfo);
             pThis->params[kParamSample].max = folderInfo.numSampleFiles - 1;
 #ifdef DISTING_HARDWARE
             NT_updateParameterDefinition(NT_algorithmIndex(self), kParamSample);
 #endif
-            // Load the current sample
-            if (!pThis->awaitingCallback) {
-                loadSample(pThis);
-            }
+            // Request sample load (handled via pendingSampleLoad below)
+            pThis->pendingSampleLoad = true;
         } else {
-            // Card unmounted - clear sample
-            dram->sampleLoaded = false;
-            dram->sampleLength = 0;
+            // Card unmounted - DON'T clear sampleLoaded!
+            // Keep playing whatever was loaded (test tone or previously loaded sample)
+            // Only clear pending load state
+            pThis->pendingSampleLoad = false;
+            pThis->awaitingCallback = false;
         }
     }
 
     // Handle deferred sample load requests
     if (pThis->pendingSampleLoad && !pThis->awaitingCallback) {
-        pThis->pendingSampleLoad = false;
-        loadSample(pThis);
+        if (loadSample(pThis)) {
+            pThis->pendingSampleLoad = false;  // Only clear if load actually started
+        }
     }
 
     // Get output busses
@@ -828,13 +840,13 @@ void step(_NT_algorithm* self, float* busFrames, int numFramesBy4) {
     float* outR = busFrames + (pThis->v[kParamOutputR] - 1) * numFrames;
     bool replace = pThis->v[kParamOutputLMode];
 
-    // Get CV inputs
-    const float* cvAnchor = busFrames + (pThis->v[kParamCvAnchor] - 1) * numFrames;
-    const float* cvPitch = busFrames + (pThis->v[kParamCvPitch] - 1) * numFrames;
-    const float* cvDrift = busFrames + (pThis->v[kParamCvDrift] - 1) * numFrames;
-    const float* cvEntropy = busFrames + (pThis->v[kParamCvEntropy] - 1) * numFrames;
-    const float* cvStorm = busFrames + (pThis->v[kParamCvStorm] - 1) * numFrames;
-    const float* cvClock = busFrames + (pThis->v[kParamCvClock] - 1) * numFrames;
+    // Get CV inputs (only if assigned - value 0 means "None")
+    const float* cvAnchor = (pThis->v[kParamCvAnchor] > 0) ? busFrames + (pThis->v[kParamCvAnchor] - 1) * numFrames : NULL;
+    const float* cvPitch = (pThis->v[kParamCvPitch] > 0) ? busFrames + (pThis->v[kParamCvPitch] - 1) * numFrames : NULL;
+    const float* cvDrift = (pThis->v[kParamCvDrift] > 0) ? busFrames + (pThis->v[kParamCvDrift] - 1) * numFrames : NULL;
+    const float* cvEntropy = (pThis->v[kParamCvEntropy] > 0) ? busFrames + (pThis->v[kParamCvEntropy] - 1) * numFrames : NULL;
+    const float* cvStorm = (pThis->v[kParamCvStorm] > 0) ? busFrames + (pThis->v[kParamCvStorm] - 1) * numFrames : NULL;
+    const float* cvClock = (pThis->v[kParamCvClock] > 0) ? busFrames + (pThis->v[kParamCvClock] - 1) * numFrames : NULL;
 
     // Get CV outputs
     float* cvOutPos = busFrames + (pThis->v[kParamCvOutPosition] - 1) * numFrames;
@@ -858,13 +870,13 @@ void step(_NT_algorithm* self, float* busFrames, int numFramesBy4) {
 
     // Process each sample
     for (int frame = 0; frame < numFrames; frame++) {
-        // Read CV modulation (sample at audio rate)
-        float anchorMod = cvAnchor[frame] * 0.1f;  // ±5V = ±0.5 (50%)
-        float pitchMod = cvPitch[frame] * 12.0f;  // 1V/oct
-        float driftMod = 1.0f + cvDrift[frame] * 0.2f;  // ±5V = ±100%
-        float entropyMod = fmaxf(0, cvEntropy[frame] * 0.2f);  // 0-5V = 0-100%
-        float stormGate = cvStorm[frame] > 1.0f;  // Gate threshold
-        float clockIn = cvClock[frame];
+        // Read CV modulation (sample at audio rate, check for NULL)
+        float anchorMod = cvAnchor ? cvAnchor[frame] * 0.1f : 0;  // ±5V = ±0.5 (50%)
+        float pitchMod = cvPitch ? cvPitch[frame] * 12.0f : 0;  // 1V/oct
+        float driftMod = cvDrift ? 1.0f + cvDrift[frame] * 0.2f : 1.0f;  // ±5V = ±100%
+        float entropyMod = cvEntropy ? fmaxf(0, cvEntropy[frame] * 0.2f) : 0;  // 0-5V = 0-100%
+        float stormGate = cvStorm ? cvStorm[frame] > 1.0f : false;  // Gate threshold
+        float clockIn = cvClock ? cvClock[frame] : 0;
 
         // Smooth parameters
         float smoothRate = 0.001f;
@@ -1235,7 +1247,7 @@ bool draw(_NT_algorithm* self) {
     int entropyWidth = (int)(dtc->entropySmooth * 30);
     NT_drawShapeI(kNT_rectangle, 160, 49, 160 + entropyWidth, 53, 12);
 
-    return false;  // Show standard parameter line
+    return true;  // Hide standard parameter line, we draw everything
 }
 
 // ============================================================================
