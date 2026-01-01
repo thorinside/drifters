@@ -37,12 +37,7 @@ static constexpr int kWaveformOverviewWidth = 236;   // Pixels for waveform disp
 
 // Filter bank center frequencies (Hz) - lowest at 250Hz to avoid granular artifacts
 static constexpr float kBandCenterFreqs[kNumDrifters] = { 250.0f, 750.0f, 1550.0f, 4000.0f };
-// Stereo positions for each drifter (-1 to +1)
-static constexpr float kDrifterPan[kNumDrifters] = { -1.0f, -0.5f, 0.5f, 1.0f };
-// Pre-calculated equal-power pan coefficients (avoid trig in inner loop)
-// panL = cos((pan+1) * 0.25 * PI), panR = sin((pan+1) * 0.25 * PI)
-static constexpr float kDrifterPanL[kNumDrifters] = { 1.0f, 0.9239f, 0.3827f, 0.0f };
-static constexpr float kDrifterPanR[kNumDrifters] = { 0.0f, 0.3827f, 0.9239f, 1.0f };
+// Note: Stereo panning is now dynamic based on drifter position relative to anchor
 // Clock phase offsets for each drifter (used for quantized clock mode)
 // static constexpr float kClockPhaseOffset[kNumDrifters] = { 0.0f, 0.25f, 0.5f, 0.75f };
 
@@ -339,6 +334,11 @@ struct _driftEngineAlgorithm : public _NT_algorithm {
 
     // Note: Parameter values are read directly from pThis->v[] rather than cached
     // This ensures we always use current values and simplifies serialisation
+
+    // Soft takeover state for push+turn (3 pots)
+    bool potButtonWasPressed[3];       // Previous frame button state
+    float lastPotPos[3];               // Previous pot position for delta calculation
+    bool inRelativeMode[3];            // True while doing relative takeover
 };
 
 // ============================================================================
@@ -648,6 +648,13 @@ _NT_algorithm* construct(const _NT_algorithmMemoryPtrs& ptrs,
     alg->pendingSampleLength = 0;
     alg->pendingSourceSampleRate = 48000.0f;  // Default
     alg->sourceSampleRate = 48000.0f;         // Default (will be updated on sample load)
+
+    // Initialize soft takeover state
+    for (int i = 0; i < 3; i++) {
+        alg->potButtonWasPressed[i] = false;
+        alg->lastPotPos[i] = 0.5f;
+        alg->inRelativeMode[i] = false;
+    }
 
     // Mark as fully initialized
     alg->initialized = true;
@@ -999,9 +1006,16 @@ void step(_NT_algorithm* self, float* busFrames, int numFramesBy4) {
             float tiltAmount = pThis->v[kParamTilt] / 100.0f;
             sample *= tiltVolume(d, tiltAmount);
 
-            // Apply stereo panning (pre-calculated coefficients)
-            mixL += sample * kDrifterPanL[d];
-            mixR += sample * kDrifterPanR[d];
+            // Apply stereo panning based on drifter position relative to anchor
+            // Left of anchor = left pan, right of anchor = right pan
+            float drifterPos = dtc->drifters[d].position;
+            float pan = (wander > 0.01f) ? (drifterPos - anchor) / wander : 0;
+            pan = fmaxf(-1.0f, fminf(1.0f, pan));  // Clamp to -1..+1
+            // Linear crossfade panning (cheap, sounds fine for ambient)
+            float panL = 0.5f - pan * 0.5f;
+            float panR = 0.5f + pan * 0.5f;
+            mixL += sample * panL;
+            mixR += sample * panR;
 
             // Advance grain
             grain.position += grain.positionDelta;
@@ -1198,41 +1212,65 @@ void customUi(_NT_algorithm* self, const _NT_uiData& data) {
     int algIndex = NT_algorithmIndex(self);
     int offset = NT_parameterOffset();
 
-    // Pot L: Density (0-100%), or Deviation when pushed
-    if (data.controls & kNT_potL) {
-        int value = (int)(data.pots[0] * 100.0f);
-        if (data.controls & kNT_potButtonL) {
-            // Push+turn: Deviation
-            NT_setParameterFromUi(algIndex, kParamDeviation + offset, value);
-        } else {
-            // Normal: Density
-            NT_setParameterFromUi(algIndex, kParamDensity + offset, value);
-        }
-    }
+    // Button states for detecting transitions
+    bool buttonPressed[3] = {
+        (data.controls & kNT_potButtonL) != 0,
+        (data.controls & kNT_potButtonC) != 0,
+        (data.controls & kNT_potButtonR) != 0
+    };
 
-    // Pot C: Anchor (0-100%), or Wander when pushed
-    if (data.controls & kNT_potC) {
-        int value = (int)(data.pots[1] * 100.0f);
-        if (data.controls & kNT_potButtonC) {
-            // Push+turn: Wander
-            NT_setParameterFromUi(algIndex, kParamWander + offset, value);
-        } else {
-            // Normal: Anchor
-            NT_setParameterFromUi(algIndex, kParamAnchor + offset, value);
-        }
-    }
+    // Parameter info: [normal param, alt param, alt min, alt max]
+    const int normalParams[3] = { kParamDensity, kParamAnchor, kParamSpectrum };
+    const int altParams[3] = { kParamDeviation, kParamWander, kParamTilt };
+    const float altMin[3] = { 0, 0, -100 };
+    const float altMax[3] = { 100, 100, 100 };
 
-    // Pot R: Spectrum (0-100%), or Tilt (-100 to +100) when pushed
-    if (data.controls & kNT_potR) {
-        if (data.controls & kNT_potButtonR) {
-            // Push+turn: Tilt (bipolar: 0-100% pot maps to -100 to +100)
-            int value = (int)(data.pots[2] * 200.0f) - 100;
-            NT_setParameterFromUi(algIndex, kParamTilt + offset, value);
-        } else {
-            // Normal: Spectrum
-            int value = (int)(data.pots[2] * 100.0f);
-            NT_setParameterFromUi(algIndex, kParamSpectrum + offset, value);
+    // Process each pot with relative soft takeover for push+turn
+    for (int pot = 0; pot < 3; pot++) {
+        uint16_t potFlag = (pot == 0) ? kNT_potL : (pot == 1) ? kNT_potC : kNT_potR;
+        if (!(data.controls & potFlag)) continue;  // Pot not changed
+
+        float potPos = data.pots[pot];
+        float delta = potPos - pThis->lastPotPos[pot];
+
+        // Detect mode transition (button state changed)
+        bool justTransitioned = (buttonPressed[pot] != pThis->potButtonWasPressed[pot]);
+        if (justTransitioned) {
+            pThis->inRelativeMode[pot] = true;
         }
+
+        // Determine which parameter we're controlling
+        int paramIdx = buttonPressed[pot] ? altParams[pot] : normalParams[pot];
+        float paramMin = buttonPressed[pot] ? altMin[pot] : 0;
+        float paramMax = buttonPressed[pot] ? altMax[pot] : 100;
+        float paramRange = paramMax - paramMin;
+
+        // Get current parameter value as pot position (0-1)
+        float currentVal = (float)pThis->v[paramIdx];
+        float paramAsPot = (currentVal - paramMin) / paramRange;
+
+        if (pThis->inRelativeMode[pot]) {
+            // Relative mode: apply pot delta to parameter value
+            float newParamAsPot = paramAsPot + delta;
+            newParamAsPot = fmaxf(0, fminf(1, newParamAsPot));
+
+            int newValue = (int)(newParamAsPot * paramRange + paramMin);
+            NT_setParameterFromUi(algIndex, paramIdx + offset, newValue);
+
+            // Check if pot has converged with parameter (within 2%)
+            // or if we've hit an endpoint
+            if (fabsf(potPos - newParamAsPot) < 0.02f ||
+                newParamAsPot <= 0 || newParamAsPot >= 1) {
+                pThis->inRelativeMode[pot] = false;
+            }
+        } else {
+            // Absolute mode: pot directly controls parameter
+            int value = (int)(potPos * paramRange + paramMin);
+            NT_setParameterFromUi(algIndex, paramIdx + offset, value);
+        }
+
+        pThis->lastPotPos[pot] = potPos;
+        pThis->potButtonWasPressed[pot] = buttonPressed[pot];
     }
 
     // Encoder L (left): Gravity - increment/decrement
