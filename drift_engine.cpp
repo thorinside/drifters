@@ -32,6 +32,7 @@ static constexpr int kMaxGrainsPerDrifter = 4;
 static constexpr int kMaxTotalGrains = kNumDrifters * kMaxGrainsPerDrifter;
 static constexpr int kMaxActiveGrains = 8;  // CPU limit - stop rendering beyond this
 static constexpr int kMaxSampleFrames = 48000 * 32;  // 32 seconds at 48kHz
+static constexpr int kWaveformOverviewWidth = 236;   // Pixels for waveform display
 
 
 // Filter bank center frequencies (Hz) - lowest at 250Hz to avoid granular artifacts
@@ -172,6 +173,9 @@ struct _driftEngine_DRAM {
     int32_t sampleLength;      // Current sample length in frames
     bool sampleLoaded;
     bool sampleIsStereo;
+
+    // Waveform overview for display (peak amplitude per pixel column)
+    float waveformOverview[kWaveformOverviewWidth];
 };
 
 // ============================================================================
@@ -330,23 +334,11 @@ struct _driftEngineAlgorithm : public _NT_algorithm {
     bool initialized;          // Set after construct completes
     bool pendingSampleLoad;    // Deferred sample load request
     int32_t pendingSampleLength; // Length of sample being loaded
-    float pendingSampleRateRatio; // Sample rate ratio of sample being loaded
-    float sampleRateRatio;     // Source sample rate / device sample rate
+    float pendingSourceSampleRate; // Sample rate of sample being loaded
+    float sourceSampleRate;    // Source sample's native sample rate (calculate ratio on the fly)
 
-    // Cached values from parameters
-    float anchorTarget;
-    float wanderAmount;
-    float gravityForce;
-    float driftSpeed;
-    float densityRate;     // Grains per second
-    float grainSize;       // Grain duration in samples
-    float pitchOffset;     // Master pitch in semitones
-    float scatterAmount;   // Pitch scatter
-    float spectrumSep;     // Filter bank separation
-    float tiltAmount;      // Spectral tilt
-    GrainShape grainShape;
-    float entropyTarget;
-    float deviationAmount; // Clock deviation
+    // Note: Parameter values are read directly from pThis->v[] rather than cached
+    // This ensures we always use current values and simplifies serialisation
 };
 
 // ============================================================================
@@ -518,6 +510,26 @@ void calculateRequirements(_NT_algorithmRequirements& req, const int32_t* specif
 }
 
 // Callback when WAV loading completes (like sample player example)
+// Compute waveform overview for display (peak amplitude per pixel)
+static void computeWaveformOverview(_driftEngine_DRAM* dram) {
+    if (dram->sampleLength <= 0) return;
+
+    float samplesPerPixel = (float)dram->sampleLength / kWaveformOverviewWidth;
+
+    for (int px = 0; px < kWaveformOverviewWidth; px++) {
+        int startSample = (int)(px * samplesPerPixel);
+        int endSample = (int)((px + 1) * samplesPerPixel);
+        if (endSample > dram->sampleLength) endSample = dram->sampleLength;
+
+        float maxAmp = 0;
+        for (int s = startSample; s < endSample; s++) {
+            float amp = fabsf(dram->sampleBufferL[s]);
+            if (amp > maxAmp) maxAmp = amp;
+        }
+        dram->waveformOverview[px] = maxAmp;
+    }
+}
+
 static void wavLoadCallback(void* callbackData, bool success) {
     _driftEngineAlgorithm* pThis = (_driftEngineAlgorithm*)callbackData;
     pThis->awaitingCallback = false;
@@ -525,8 +537,11 @@ static void wavLoadCallback(void* callbackData, bool success) {
     if (success) {
         // Apply the pending sample info now that load is complete
         pThis->dram->sampleLength = pThis->pendingSampleLength;
-        pThis->sampleRateRatio = pThis->pendingSampleRateRatio;
+        pThis->sourceSampleRate = pThis->pendingSourceSampleRate;
         pThis->dram->sampleLoaded = true;
+
+        // Compute waveform overview for display
+        computeWaveformOverview(pThis->dram);
     }
 }
 
@@ -559,7 +574,7 @@ static bool loadSample(_driftEngineAlgorithm* pThis) {
     // Store pending values - will be applied in callback when load completes
     // This keeps the old sample playing until the new one is ready
     pThis->pendingSampleLength = framesToRead;
-    pThis->pendingSampleRateRatio = (float)info.sampleRate / NT_globals.sampleRate;
+    pThis->pendingSourceSampleRate = (float)info.sampleRate;
     pThis->dram->sampleIsStereo = (info.channels == kNT_WavStereo);
 
     // Prepare the request (like sample player example)
@@ -617,30 +632,6 @@ _NT_algorithm* construct(const _NT_algorithmMemoryPtrs& ptrs,
     dram->sampleLoaded = false;
     dram->sampleIsStereo = false;
 
-    // Generate a test tone for testing without SD card samples
-    float sr = NT_globals.sampleRate;
-    // Creates a 4-second rich harmonic pad sound
-    int testLen = (int)(sr * 4);
-    dram->sampleLength = testLen;
-    dram->sampleLoaded = true;
-    dram->sampleIsStereo = false;
-    for (int i = 0; i < testLen; i++) {
-        float t = (float)i / sr;
-        float env = 1.0f;  // Sustained
-        // Multiple harmonics for a rich sound
-        float sample = 0;
-        sample += sinf(2.0f * M_PI * 220.0f * t) * 0.3f;       // Fundamental
-        sample += sinf(2.0f * M_PI * 440.0f * t) * 0.2f;       // Octave
-        sample += sinf(2.0f * M_PI * 330.0f * t) * 0.15f;      // Fifth
-        sample += sinf(2.0f * M_PI * 550.0f * t) * 0.1f;       // Major third
-        sample += sinf(2.0f * M_PI * 660.0f * t) * 0.08f;      // Fifth + octave
-        // Slow amplitude modulation for movement
-        sample *= (0.8f + 0.2f * sinf(2.0f * M_PI * 0.5f * t));
-        sample *= env * 0.5f;
-        dram->sampleBufferL[i] = sample;
-        dram->sampleBufferR[i] = sample;
-    }
-
     // Create algorithm
     _driftEngineAlgorithm* alg = new (ptrs.sram) _driftEngineAlgorithm(dtc, dram);
 
@@ -655,23 +646,8 @@ _NT_algorithm* construct(const _NT_algorithmMemoryPtrs& ptrs,
     alg->initialized = false;
     alg->pendingSampleLoad = false;
     alg->pendingSampleLength = 0;
-    alg->pendingSampleRateRatio = 1.0f;
-    alg->sampleRateRatio = 1.0f;
-
-    // Initialize cached values
-    alg->anchorTarget = 0.5f;
-    alg->wanderAmount = 0.3f;
-    alg->gravityForce = 0;
-    alg->driftSpeed = 0.3f;
-    alg->densityRate = 8.0f;
-    alg->grainSize = 0.125f * sr;
-    alg->pitchOffset = 0;
-    alg->scatterAmount = 0;
-    alg->spectrumSep = 0;
-    alg->tiltAmount = 0;
-    alg->grainShape = kShapeCloud;
-    alg->entropyTarget = 0.25f;
-    alg->deviationAmount = 1.0f;
+    alg->pendingSourceSampleRate = 48000.0f;  // Default
+    alg->sourceSampleRate = 48000.0f;         // Default (will be updated on sample load)
 
     // Mark as fully initialized
     alg->initialized = true;
@@ -681,7 +657,6 @@ _NT_algorithm* construct(const _NT_algorithmMemoryPtrs& ptrs,
 
 void parameterChanged(_NT_algorithm* self, int p) {
     _driftEngineAlgorithm* pThis = (_driftEngineAlgorithm*)self;
-    float sr = NT_globals.sampleRate;
 
     switch (p) {
         case kParamFolder: {
@@ -698,45 +673,7 @@ void parameterChanged(_NT_algorithm* self, int p) {
             // Request sample load (deferred to step() for safety)
             pThis->pendingSampleLoad = true;
             break;
-        case kParamAnchor:
-            pThis->anchorTarget = pThis->v[kParamAnchor] / 100.0f;
-            break;
-        case kParamWander:
-            pThis->wanderAmount = pThis->v[kParamWander] / 100.0f;
-            break;
-        case kParamGravity:
-            pThis->gravityForce = pThis->v[kParamGravity] / 100.0f;
-            break;
-        case kParamDrift:
-            pThis->driftSpeed = pThis->v[kParamDrift] / 100.0f;
-            break;
-        case kParamDensity: {
-            float d = pThis->v[kParamDensity];
-            pThis->densityRate = densityToRate(d);
-            pThis->grainSize = densityToSize(d) * sr;
-            break;
-        }
-        case kParamDeviation:
-            pThis->deviationAmount = pThis->v[kParamDeviation] / 100.0f;
-            break;
-        case kParamPitch:
-            pThis->pitchOffset = pThis->v[kParamPitch];
-            break;
-        case kParamScatter:
-            pThis->scatterAmount = pThis->v[kParamScatter];
-            break;
-        case kParamSpectrum:
-            pThis->spectrumSep = pThis->v[kParamSpectrum] / 100.0f;
-            break;
-        case kParamTilt:
-            pThis->tiltAmount = pThis->v[kParamTilt] / 100.0f;
-            break;
-        case kParamShape:
-            pThis->grainShape = (GrainShape)pThis->v[kParamShape];
-            break;
-        case kParamEntropy:
-            pThis->entropyTarget = pThis->v[kParamEntropy] / 100.0f;
-            break;
+        // All other parameters are read directly from pThis->v[] in step()
     }
 }
 
@@ -826,14 +763,17 @@ void step(_NT_algorithm* self, float* busFrames, int numFramesBy4) {
         float stormGate = cvStorm ? cvStorm[frame] > 1.0f : false;  // Gate threshold
         float clockIn = cvClock ? cvClock[frame] : 0;
 
-        // Smooth parameters
+        // Smooth parameters (read directly from v[])
         float smoothRate = 0.001f;
-        dtc->anchorSmooth += (pThis->anchorTarget + anchorMod - dtc->anchorSmooth) * smoothRate;
-        dtc->driftSmooth += (pThis->driftSpeed * driftMod - dtc->driftSmooth) * smoothRate;
-        dtc->densitySmooth += (pThis->densityRate - dtc->densitySmooth) * smoothRate;
+        float anchorTarget = pThis->v[kParamAnchor] / 100.0f;
+        float driftSpeed = pThis->v[kParamDrift] / 100.0f;
+        float densityRate = densityToRate((float)pThis->v[kParamDensity]);
+        dtc->anchorSmooth += (anchorTarget + anchorMod - dtc->anchorSmooth) * smoothRate;
+        dtc->driftSmooth += (driftSpeed * driftMod - dtc->driftSmooth) * smoothRate;
+        dtc->densitySmooth += (densityRate - dtc->densitySmooth) * smoothRate;
 
         // Entropy with CV and storm
-        float targetEntropy = pThis->entropyTarget + entropyMod;
+        float targetEntropy = pThis->v[kParamEntropy] / 100.0f + entropyMod;
         if (stormGate) {
             dtc->stormLevel = 1.0f;  // Instant max
         } else {
@@ -861,8 +801,8 @@ void step(_NT_algorithm* self, float* busFrames, int numFramesBy4) {
 
         // ====== UPDATE DRIFTERS ======
         float anchor = fmaxf(0, fminf(1, dtc->anchorSmooth));
-        float wander = pThis->wanderAmount;
-        float gravity = pThis->gravityForce;
+        float wander = pThis->v[kParamWander] / 100.0f;
+        float gravity = pThis->v[kParamGravity] / 100.0f;
         float drift = dtc->driftSmooth;
         float entropy = dtc->entropySmooth;
 
@@ -875,11 +815,24 @@ void step(_NT_algorithm* self, float* busFrames, int numFramesBy4) {
             float dist = drifter.position - anchor;
             float gravityAccel = -gravity * dist * 100.0f;  // Toward anchor when positive
 
+            // Calculate repulsion from other drifters (spreads them apart)
+            float repulsion = 0;
+            for (int other = 0; other < kNumDrifters; other++) {
+                if (other == d) continue;
+                float diff = drifter.position - dtc->drifters[other].position;
+                // Inverse-square-ish repulsion, but softer to avoid instability
+                // Sign of diff gives direction, magnitude decreases with distance
+                float absDiff = fabsf(diff);
+                if (absDiff < 0.01f) absDiff = 0.01f;  // Prevent divide by zero
+                repulsion += (diff > 0 ? 1.0f : -1.0f) * 0.0001f / (absDiff * absDiff);
+            }
+
             // Random walk based on entropy
             float randomWalk = randFloatBipolar(dtc) * entropy * 0.01f;
 
             // Update velocity
             drifter.velocity += gravityAccel * dt;
+            drifter.velocity += repulsion;  // Add repulsion force
             drifter.velocity += randomWalk;
             drifter.velocity *= 0.995f;  // Slightly less aggressive damping
 
@@ -918,10 +871,11 @@ void step(_NT_algorithm* self, float* busFrames, int numFramesBy4) {
 
             // Determine if we should trigger a grain
             bool shouldTrigger = false;
+            float deviation = pThis->v[kParamDeviation] / 100.0f;
 
-            if (dtc->clockReceived && pThis->deviationAmount < 1.0f) {
+            if (dtc->clockReceived && deviation < 1.0f) {
                 // Clock sync mode
-                if (pThis->deviationAmount == 0.0f) {
+                if (deviation == 0.0f) {
                     // Pure clock sync: only trigger on clock edges
                     // Each drifter triggers on clock (could add phase offsets later)
                     shouldTrigger = clockEdge;
@@ -932,7 +886,7 @@ void step(_NT_algorithm* self, float* busFrames, int numFramesBy4) {
                         shouldTrigger = true;
                     } else if (drifter.timeSinceGrain >= drifter.nextGrainTime) {
                         // Random trigger with probability based on deviation
-                        shouldTrigger = (randFloat(dtc) < pThis->deviationAmount);
+                        shouldTrigger = (randFloat(dtc) < deviation);
                     }
                 }
             } else {
@@ -961,23 +915,26 @@ void step(_NT_algorithm* self, float* busFrames, int numFramesBy4) {
                         int rawPos = (int)(drifter.position * sampleLen);
                         grain.position = (float)findNearestZeroCrossing(dram->sampleBufferL, rawPos, dram->sampleLength, 256);
                         grain.phase = 0;
-                        grain.phaseDelta = 1.0f / pThis->grainSize;
+                        float grainSize = densityToSize((float)pThis->v[kParamDensity]) * sr;
+                        grain.phaseDelta = 1.0f / grainSize;
                         grain.drifterIndex = d;
-                        grain.shape = pThis->grainShape;
+                        grain.shape = (GrainShape)pThis->v[kParamShape];
                         grain.amplitude = 1.0f;  // Base amplitude (soft clipping handles overload)
 
                         // Calculate pitch
-                        float pitchSemis = pThis->pitchOffset + pitchMod;
+                        float pitchSemis = (float)pThis->v[kParamPitch] + pitchMod;
                         // Scatter: D1&D4 get positive, D2&D3 get negative
                         float scatterDir = (d == 0 || d == 3) ? 1.0f : -1.0f;
                         float scatterIdx = (d == 0 || d == 3) ? fabsf(d - 1.5f) : fabsf(d - 1.5f);
-                        pitchSemis += pThis->scatterAmount * scatterDir * (scatterIdx / 1.5f);
+                        pitchSemis += (float)pThis->v[kParamScatter] * scatterDir * (scatterIdx / 1.5f);
 
                         // Add per-grain random pitch based on entropy
                         pitchSemis += randFloatBipolar(dtc) * entropy * 2.0f;  // ±2 semitones max
 
                         // Include sample rate ratio for proper playback speed
-                        grain.positionDelta = powf(2.0f, pitchSemis / 12.0f) * pThis->sampleRateRatio;
+                        // Calculate sample rate ratio on the fly (handles NT sample rate changes)
+                        float sampleRateRatio = pThis->sourceSampleRate / sr;
+                        grain.positionDelta = powf(2.0f, pitchSemis / 12.0f) * sampleRateRatio;
 
                         // Don't reset filters - let state carry over to avoid transients
                         // grain.filterL.reset();
@@ -1028,14 +985,16 @@ void step(_NT_algorithm* self, float* busFrames, int numFramesBy4) {
             // Apply filter bank separation (spectrum parameter)
             int d = grain.drifterIndex;
 
-            if (pThis->spectrumSep > 0.01f) {
+            float spectrumSep = pThis->v[kParamSpectrum] / 100.0f;
+            if (spectrumSep > 0.01f) {
                 float filterFreq = kBandCenterFreqs[d];
-                float filterQ = 1.0f + pThis->spectrumSep * 2.0f;  // Q from 1 to 3
-                sample = grain.filterL.process(sample, filterFreq, filterQ, sr) * (1.0f + pThis->spectrumSep);
+                float filterQ = 1.0f + spectrumSep * 2.0f;  // Q from 1 to 3
+                sample = grain.filterL.process(sample, filterFreq, filterQ, sr) * (1.0f + spectrumSep);
             }
 
             // Apply tilt (per-drifter volume)
-            sample *= tiltVolume(d, pThis->tiltAmount);
+            float tiltAmount = pThis->v[kParamTilt] / 100.0f;
+            sample *= tiltVolume(d, tiltAmount);
 
             // Apply stereo panning (pre-calculated coefficients)
             mixL += sample * kDrifterPanL[d];
@@ -1112,7 +1071,7 @@ bool draw(_NT_algorithm* self) {
     char slotText[32];
     if (dram->sampleLoaded) {
         // Show sample duration adjusted for sample rate
-        float secs = (float)dram->sampleLength / (NT_globals.sampleRate * pThis->sampleRateRatio);
+        float secs = (float)dram->sampleLength / pThis->sourceSampleRate;
         int secInt = (int)secs;
         int secFrac = (int)((secs - secInt) * 10);
         int len = NT_intToString(slotText, secInt);
@@ -1128,10 +1087,25 @@ bool draw(_NT_algorithm* self) {
     }
     NT_drawText(246, 10, slotText, 12, kNT_textRight, kNT_textNormal);
 
-    // Sample waveform bar (simplified)
+    // Sample waveform bar
     int barY = 28;
     int barH = 10;
+    int barCenterY = barY + barH / 2;
     NT_drawShapeI(kNT_box, 10, barY, 246, barY + barH, 8);  // Outline
+
+    // Draw waveform overview inside the bar
+    if (dram->sampleLoaded) {
+        int halfH = barH / 2 - 1;  // Leave 1px margin
+        for (int px = 0; px < kWaveformOverviewWidth; px++) {
+            float amp = dram->waveformOverview[px];
+            if (amp > 1.0f) amp = 1.0f;  // Clamp
+            int h = (int)(amp * halfH);
+            if (h > 0) {
+                // Draw vertical line centered in bar (brightness 6 for subtle look)
+                NT_drawShapeI(kNT_line, 10 + px, barCenterY - h, 10 + px, barCenterY + h, 6);
+            }
+        }
+    }
 
     // Draw anchor position
     float anchor = dtc->anchorSmooth;
@@ -1139,7 +1113,7 @@ bool draw(_NT_algorithm* self) {
     NT_drawShapeI(kNT_line, anchorX, barY - 2, anchorX, barY + barH + 2, 10);  // Anchor line
 
     // Draw wander range
-    float wander = pThis->wanderAmount;
+    float wander = pThis->v[kParamWander] / 100.0f;
     int wanderMinX = 10 + (int)((anchor - wander) * 236);
     int wanderMaxX = 10 + (int)((anchor + wander) * 236);
     wanderMinX = fmaxf(10, wanderMinX);
@@ -1180,7 +1154,7 @@ bool draw(_NT_algorithm* self) {
     NT_drawText(60, 48, "Grav:", 10, kNT_textLeft, kNT_textTiny);
     int gravCenterX = 105;
     int gravHalfWidth = 20;
-    float gravNorm = pThis->gravityForce;  // -1 to +1
+    float gravNorm = pThis->v[kParamGravity] / 100.0f;  // -1 to +1
     NT_drawShapeI(kNT_line, gravCenterX, 49, gravCenterX, 53, 8);  // Center mark
     if (gravNorm > 0.01f) {
         int gravWidth = (int)(gravNorm * gravHalfWidth);
@@ -1203,12 +1177,16 @@ bool draw(_NT_algorithm* self) {
 // ============================================================================
 
 // Custom UI layout:
-//   Pot L: Density    Pot C: Anchor (Position)    Pot R: Spectrum
-//   Enc L: Fog        Enc R: Entropy
+//   Pot L: Density (push+turn: Deviation)
+//   Pot C: Anchor (push+turn: Wander)
+//   Pot R: Spectrum (push+turn: Tilt)
+//   Enc L: Gravity
+//   Enc R: Entropy
 
 uint32_t hasCustomUi(_NT_algorithm* self) {
-    // Return bitmask of controls we override
-    return kNT_potL | kNT_potC | kNT_potR | kNT_encoderL | kNT_encoderR;
+    // Return bitmask of controls we override (including pot buttons for push+turn)
+    return kNT_potL | kNT_potC | kNT_potR | kNT_encoderL | kNT_encoderR |
+           kNT_potButtonL | kNT_potButtonC | kNT_potButtonR;
 }
 
 void customUi(_NT_algorithm* self, const _NT_uiData& data) {
@@ -1216,22 +1194,41 @@ void customUi(_NT_algorithm* self, const _NT_uiData& data) {
     int algIndex = NT_algorithmIndex(self);
     int offset = NT_parameterOffset();
 
-    // Pot L: Density (0-100%)
+    // Pot L: Density (0-100%), or Deviation when pushed
     if (data.controls & kNT_potL) {
         int value = (int)(data.pots[0] * 100.0f);
-        NT_setParameterFromUi(algIndex, kParamDensity + offset, value);
+        if (data.controls & kNT_potButtonL) {
+            // Push+turn: Deviation
+            NT_setParameterFromUi(algIndex, kParamDeviation + offset, value);
+        } else {
+            // Normal: Density
+            NT_setParameterFromUi(algIndex, kParamDensity + offset, value);
+        }
     }
 
-    // Pot C: Anchor/Position (0-100%)
+    // Pot C: Anchor (0-100%), or Wander when pushed
     if (data.controls & kNT_potC) {
         int value = (int)(data.pots[1] * 100.0f);
-        NT_setParameterFromUi(algIndex, kParamAnchor + offset, value);
+        if (data.controls & kNT_potButtonC) {
+            // Push+turn: Wander
+            NT_setParameterFromUi(algIndex, kParamWander + offset, value);
+        } else {
+            // Normal: Anchor
+            NT_setParameterFromUi(algIndex, kParamAnchor + offset, value);
+        }
     }
 
-    // Pot R: Spectrum (0-100%)
+    // Pot R: Spectrum (0-100%), or Tilt (-100 to +100) when pushed
     if (data.controls & kNT_potR) {
-        int value = (int)(data.pots[2] * 100.0f);
-        NT_setParameterFromUi(algIndex, kParamSpectrum + offset, value);
+        if (data.controls & kNT_potButtonR) {
+            // Push+turn: Tilt (bipolar: 0-100% pot maps to -100 to +100)
+            int value = (int)(data.pots[2] * 200.0f) - 100;
+            NT_setParameterFromUi(algIndex, kParamTilt + offset, value);
+        } else {
+            // Normal: Spectrum
+            int value = (int)(data.pots[2] * 100.0f);
+            NT_setParameterFromUi(algIndex, kParamSpectrum + offset, value);
+        }
     }
 
     // Encoder L (left): Gravity - increment/decrement
