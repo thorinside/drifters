@@ -1138,6 +1138,70 @@ bool draw(_NT_algorithm* self) {
 }
 
 // ============================================================================
+// CUSTOM UI - Hardware pot/encoder mapping
+// ============================================================================
+
+// Custom UI layout:
+//   Pot L: Density    Pot C: Anchor (Position)    Pot R: Spectrum
+//   Enc L: Fog        Enc R: Entropy
+
+uint32_t hasCustomUi(_NT_algorithm* self) {
+    // Return bitmask of controls we override
+    return kNT_potL | kNT_potC | kNT_potR | kNT_encoderL | kNT_encoderR;
+}
+
+void customUi(_NT_algorithm* self, const _NT_uiData& data) {
+    _driftEngineAlgorithm* pThis = (_driftEngineAlgorithm*)self;
+    int algIndex = NT_algorithmIndex(self);
+    int offset = NT_parameterOffset();
+
+    // Pot L: Density (0-100%)
+    if (data.controls & kNT_potL) {
+        int value = (int)(data.pots[0] * 100.0f);
+        NT_setParameterFromUi(algIndex, kParamDensity + offset, value);
+    }
+
+    // Pot C: Anchor/Position (0-100%)
+    if (data.controls & kNT_potC) {
+        int value = (int)(data.pots[1] * 100.0f);
+        NT_setParameterFromUi(algIndex, kParamAnchor + offset, value);
+    }
+
+    // Pot R: Spectrum (0-100%)
+    if (data.controls & kNT_potR) {
+        int value = (int)(data.pots[2] * 100.0f);
+        NT_setParameterFromUi(algIndex, kParamSpectrum + offset, value);
+    }
+
+    // Encoder L (left): Fog - increment/decrement
+    if (data.encoders[0] != 0) {
+        int current = pThis->v[kParamFog];
+        int newVal = current + data.encoders[0] * 5;  // 5% steps
+        if (newVal < 0) newVal = 0;
+        if (newVal > 100) newVal = 100;
+        NT_setParameterFromUi(algIndex, kParamFog + offset, newVal);
+    }
+
+    // Encoder R (right): Entropy - increment/decrement
+    if (data.encoders[1] != 0) {
+        int current = pThis->v[kParamEntropy];
+        int newVal = current + data.encoders[1] * 5;  // 5% steps
+        if (newVal < 0) newVal = 0;
+        if (newVal > 100) newVal = 100;
+        NT_setParameterFromUi(algIndex, kParamEntropy + offset, newVal);
+    }
+}
+
+void setupUi(_NT_algorithm* self, _NT_float3& pots) {
+    _driftEngineAlgorithm* pThis = (_driftEngineAlgorithm*)self;
+
+    // Initialize pot positions for soft takeover
+    pots[0] = pThis->v[kParamDensity] / 100.0f;    // Pot L: Density
+    pots[1] = pThis->v[kParamAnchor] / 100.0f;     // Pot C: Anchor
+    pots[2] = pThis->v[kParamSpectrum] / 100.0f;   // Pot R: Spectrum
+}
+
+// ============================================================================
 // FACTORY DEFINITION
 // ============================================================================
 
@@ -1157,9 +1221,9 @@ static const _NT_factory factory = {
     .midiRealtime = NULL,
     .midiMessage = NULL,
     .tags = kNT_tagEffect | kNT_tagInstrument,
-    .hasCustomUi = NULL,
-    .customUi = NULL,
-    .setupUi = NULL,
+    .hasCustomUi = hasCustomUi,
+    .customUi = customUi,
+    .setupUi = setupUi,
 };
 
 // ============================================================================
