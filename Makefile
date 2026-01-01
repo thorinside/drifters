@@ -113,6 +113,9 @@ endif
 hardware:
 	@$(MAKE) TARGET=hardware
 
+push: hardware
+	ntpush $(OUTPUT_DIR)/$(PLUGIN_NAME).o
+
 test:
 	@$(MAKE) TARGET=test
 
@@ -138,6 +141,7 @@ help:
 	@echo "  hardware    - Build for distingNT hardware (.o)"
 	@echo "  test        - Build for nt_emu testing (.dylib/.so/.dll)"
 	@echo "  both        - Build both targets"
+	@echo "  push        - Build and push to distingNT via MIDI"
 	@echo "  check       - Check undefined symbols"
 	@echo "  size        - Show plugin size"
 	@echo "  clean       - Remove build artifacts"
@@ -148,7 +152,9 @@ help:
 	@echo "  3. Load in VCV Rack with nt_emu module"
 	@echo ""
 	@echo "Deployment:"
+	@echo "  make push                 # Build and push via MIDI"
+	@echo "  -- or --"
 	@echo "  1. make hardware"
 	@echo "  2. Copy plugins/drifters.o to distingNT SD card"
 
-.PHONY: all hardware test both check size clean help
+.PHONY: all hardware test both push check size clean help
