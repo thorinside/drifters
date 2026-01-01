@@ -841,7 +841,9 @@ void step(_NT_algorithm* self, float* busFrames, int numFramesBy4) {
             drifter.velocity *= 0.995f;  // Slightly less aggressive damping
 
             // Base drift speed - uses stored variation and BIDIRECTIONAL direction
-            float baseDrift = drift * drifter.variation * drifter.driftDirection * 0.0005f;
+            // Scale by dt so drift is time-based, not sample-rate dependent
+            // 0.05 gives ~1% per second at 30% drift - slow ambient movement
+            float baseDrift = drift * drifter.variation * drifter.driftDirection * dt * 0.05f;
 
             // Update position
             drifter.position += drifter.velocity * dt + baseDrift;
@@ -850,15 +852,18 @@ void step(_NT_algorithm* self, float* busFrames, int numFramesBy4) {
             float minPos = anchor - wander;
             float maxPos = anchor + wander;
 
-            // Soft boundaries with bounce
+            // Soft boundaries with bounce - reverse drift direction on hit
             if (drifter.position < minPos) {
                 drifter.position = minPos + (minPos - drifter.position) * 0.5f;
                 drifter.velocity = fabsf(drifter.velocity) * 0.5f;
+                drifter.driftDirection = 1.0f;  // Now drift right
             }
             if (drifter.position > maxPos) {
                 drifter.position = maxPos - (drifter.position - maxPos) * 0.5f;
                 drifter.velocity = -fabsf(drifter.velocity) * 0.5f;
+                drifter.driftDirection = -1.0f;  // Now drift left
             }
+
 
             // Hard clamp
             drifter.position = fmaxf(0.001f, fminf(0.999f, drifter.position));
@@ -1101,13 +1106,15 @@ bool draw(_NT_algorithm* self) {
     wanderMaxX = fminf(246, wanderMaxX);
     NT_drawShapeI(kNT_rectangle, wanderMinX, barY + 1, wanderMaxX, barY + barH - 1, 4);  // Wander zone
 
-    // Draw drifter positions
+    // Draw drifter positions as bright markers extending above and below bar
     for (int d = 0; d < kNumDrifters; d++) {
         int x = 10 + (int)(dtc->drifters[d].position * 236);
-        x = fmaxf(10, fminf(246, x));
-        // Different brightness per drifter
-        int brightness = 12 + d;
-        NT_drawShapeI(kNT_rectangle, x - 1, barY + 2, x + 1, barY + barH - 2, brightness);
+        x = fmaxf(12, fminf(244, x));
+
+        // Draw triangular marker above the bar (pointing down)
+        NT_drawShapeI(kNT_rectangle, x - 1, barY - 4, x + 2, barY, 15);
+        // Draw triangular marker below the bar (pointing up)
+        NT_drawShapeI(kNT_rectangle, x - 1, barY + barH, x + 2, barY + barH + 4, 15);
     }
 
     // Status line
