@@ -129,6 +129,8 @@ struct Drifter {
     float nextGrainTime;   // Time until next grain (Poisson)
     float variation;       // Per-drifter speed variation (0.5-1.0), set once
     float driftDirection;  // -1 or +1, set once at init
+    float boredom;         // Builds up when staying in same region (0-1)
+    float lastSignificantPos; // Position when boredom last reset
 };
 
 
@@ -338,7 +340,8 @@ struct _driftEngineAlgorithm : public _NT_algorithm {
     // Soft takeover state for push+turn (3 pots)
     bool potButtonWasPressed[3];       // Previous frame button state
     float lastPotPos[3];               // Previous pot position for delta calculation
-    bool inRelativeMode[3];            // True while doing relative takeover
+    float normalTarget[3];             // Virtual pot position for normal mode (0-1)
+    float altTarget[3];                // Virtual pot position for alt mode (0-1)
 };
 
 // ============================================================================
@@ -623,6 +626,8 @@ _NT_algorithm* construct(const _NT_algorithmMemoryPtrs& ptrs,
         dtc->drifters[i].nextGrainTime = randFloat(dtc) * 0.5f;  // Stagger initial grains
         dtc->drifters[i].variation = 0.5f + randFloat(dtc) * 0.5f;  // 0.5-1.0, set once
         dtc->drifters[i].driftDirection = (i % 2 == 0) ? 1.0f : -1.0f;  // Alternate directions
+        dtc->drifters[i].boredom = 0;
+        dtc->drifters[i].lastSignificantPos = dtc->drifters[i].position;
     }
 
     // Initialize DRAM
@@ -650,10 +655,12 @@ _NT_algorithm* construct(const _NT_algorithmMemoryPtrs& ptrs,
     alg->sourceSampleRate = 48000.0f;         // Default (will be updated on sample load)
 
     // Initialize soft takeover state
+    // Targets start at middle - will sync on first pot movement
     for (int i = 0; i < 3; i++) {
         alg->potButtonWasPressed[i] = false;
         alg->lastPotPos[i] = 0.5f;
-        alg->inRelativeMode[i] = false;
+        alg->normalTarget[i] = 0.5f;
+        alg->altTarget[i] = 0.5f;
     }
 
     // Mark as fully initialized
@@ -823,6 +830,7 @@ void step(_NT_algorithm* self, float* busFrames, int numFramesBy4) {
             float gravityAccel = -gravity * dist * 100.0f;  // Toward anchor when positive
 
             // Calculate repulsion from other drifters (only when close)
+            // Repulsion is reduced by boredom - bored drifters can pass each other
             float repulsion = 0;
             const float repulsionThreshold = 0.05f;  // Only repel within 5% of sample
             for (int other = 0; other < kNumDrifters; other++) {
@@ -836,6 +844,8 @@ void step(_NT_algorithm* self, float* busFrames, int numFramesBy4) {
                     repulsion += (diff > 0 ? 1.0f : -1.0f) * strength;
                 }
             }
+            // Scale repulsion by (1 - boredom): bored drifters are attracted to pass
+            repulsion *= (1.0f - drifter.boredom * 1.05f);  // -5% at full boredom
 
             // Random walk based on entropy
             float randomWalk = randFloatBipolar(dtc) * entropy * 0.01f;
@@ -873,6 +883,19 @@ void step(_NT_algorithm* self, float* busFrames, int numFramesBy4) {
 
             // Hard clamp
             drifter.position = fmaxf(0.001f, fminf(0.999f, drifter.position));
+
+            // Update boredom: builds up when staying in same region, resets on movement
+            const float boredomMovementThreshold = 0.03f;  // 3% movement resets boredom
+            const float boredomBuildRate = 0.05f;          // Time to full boredom ~20 sec
+            float movementFromHome = fabsf(drifter.position - drifter.lastSignificantPos);
+            if (movementFromHome > boredomMovementThreshold) {
+                // Moved significantly - reset boredom and update home
+                drifter.boredom = 0;
+                drifter.lastSignificantPos = drifter.position;
+            } else {
+                // Staying in same region - slowly increase boredom
+                drifter.boredom = fminf(1.0f, drifter.boredom + boredomBuildRate * dt);
+            }
 
             avgPos += drifter.position;
 
@@ -1225,51 +1248,49 @@ void customUi(_NT_algorithm* self, const _NT_uiData& data) {
     const float altMin[3] = { 0, 0, -100 };
     const float altMax[3] = { 100, 100, 100 };
 
-    // Process each pot with relative soft takeover for push+turn
+    // Process each pot with target-based soft takeover for push+turn
+    // Each mode (normal/alt) has its own target that tracks the "virtual pot position"
     for (int pot = 0; pot < 3; pot++) {
         uint16_t potFlag = (pot == 0) ? kNT_potL : (pot == 1) ? kNT_potC : kNT_potR;
-        if (!(data.controls & potFlag)) continue;  // Pot not changed
+        bool potMoved = (data.controls & potFlag) != 0;
 
-        float potPos = data.pots[pot];
-        float delta = potPos - pThis->lastPotPos[pot];
+        // Only process pot if it moved
+        if (potMoved) {
+            float potPos = data.pots[pot];
+            float delta = potPos - pThis->lastPotPos[pot];
 
-        // Detect mode transition (button state changed)
-        bool justTransitioned = (buttonPressed[pot] != pThis->potButtonWasPressed[pot]);
-        if (justTransitioned) {
-            pThis->inRelativeMode[pot] = true;
-        }
+            // Get the target for current mode
+            float* target = buttonPressed[pot] ? &pThis->altTarget[pot] : &pThis->normalTarget[pot];
 
-        // Determine which parameter we're controlling
-        int paramIdx = buttonPressed[pot] ? altParams[pot] : normalParams[pot];
-        float paramMin = buttonPressed[pot] ? altMin[pot] : 0;
-        float paramMax = buttonPressed[pot] ? altMax[pot] : 100;
-        float paramRange = paramMax - paramMin;
+            // Always apply delta to the target
+            *target += delta;
+            *target = fmaxf(0, fminf(1, *target));
 
-        // Get current parameter value as pot position (0-1)
-        float currentVal = (float)pThis->v[paramIdx];
-        float paramAsPot = (currentVal - paramMin) / paramRange;
+            // Determine which parameter we're controlling
+            int paramIdx = buttonPressed[pot] ? altParams[pot] : normalParams[pot];
+            float paramMin = buttonPressed[pot] ? altMin[pot] : 0;
+            float paramMax = buttonPressed[pot] ? altMax[pot] : 100;
+            float paramRange = paramMax - paramMin;
 
-        if (pThis->inRelativeMode[pot]) {
-            // Relative mode: apply pot delta to parameter value
-            float newParamAsPot = paramAsPot + delta;
-            newParamAsPot = fmaxf(0, fminf(1, newParamAsPot));
+            // Check if pot has caught up to target (within 2%) or hit endpoint
+            bool inSync = fabsf(potPos - *target) < 0.02f ||
+                          potPos <= 0.01f || potPos >= 0.99f;
 
-            int newValue = (int)(newParamAsPot * paramRange + paramMin);
-            NT_setParameterFromUi(algIndex, paramIdx + offset, newValue);
-
-            // Check if pot has converged with parameter (within 2%)
-            // or if we've hit an endpoint
-            if (fabsf(potPos - newParamAsPot) < 0.02f ||
-                newParamAsPot <= 0 || newParamAsPot >= 1) {
-                pThis->inRelativeMode[pot] = false;
+            if (inSync) {
+                // Synced: pot directly controls parameter, target follows pot
+                *target = potPos;
+                int value = (int)(potPos * paramRange + paramMin);
+                NT_setParameterFromUi(algIndex, paramIdx + offset, value);
+            } else {
+                // Relative mode: parameter follows target
+                int value = (int)(*target * paramRange + paramMin);
+                NT_setParameterFromUi(algIndex, paramIdx + offset, value);
             }
-        } else {
-            // Absolute mode: pot directly controls parameter
-            int value = (int)(potPos * paramRange + paramMin);
-            NT_setParameterFromUi(algIndex, paramIdx + offset, value);
+
+            pThis->lastPotPos[pot] = potPos;
         }
 
-        pThis->lastPotPos[pot] = potPos;
+        // Always update button state tracking
         pThis->potButtonWasPressed[pot] = buttonPressed[pot];
     }
 
