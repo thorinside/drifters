@@ -815,16 +815,19 @@ void step(_NT_algorithm* self, float* busFrames, int numFramesBy4) {
             float dist = drifter.position - anchor;
             float gravityAccel = -gravity * dist * 100.0f;  // Toward anchor when positive
 
-            // Calculate repulsion from other drifters (spreads them apart)
+            // Calculate repulsion from other drifters (only when close)
             float repulsion = 0;
+            const float repulsionThreshold = 0.05f;  // Only repel within 5% of sample
             for (int other = 0; other < kNumDrifters; other++) {
                 if (other == d) continue;
                 float diff = drifter.position - dtc->drifters[other].position;
-                // Inverse-square-ish repulsion, but softer to avoid instability
-                // Sign of diff gives direction, magnitude decreases with distance
                 float absDiff = fabsf(diff);
-                if (absDiff < 0.01f) absDiff = 0.01f;  // Prevent divide by zero
-                repulsion += (diff > 0 ? 1.0f : -1.0f) * 0.0001f / (absDiff * absDiff);
+                // Only apply repulsion when within threshold distance
+                if (absDiff < repulsionThreshold && absDiff > 0.001f) {
+                    // Inversely proportional to distance (stronger when closer)
+                    float strength = 0.00001f / absDiff;
+                    repulsion += (diff > 0 ? 1.0f : -1.0f) * strength;
+                }
             }
 
             // Random walk based on entropy
@@ -1093,32 +1096,18 @@ bool draw(_NT_algorithm* self) {
     int barCenterY = barY + barH / 2;
     NT_drawShapeI(kNT_box, 10, barY, 246, barY + barH, 8);  // Outline
 
-    // Draw waveform overview inside the bar
-    if (dram->sampleLoaded) {
-        int halfH = barH / 2 - 1;  // Leave 1px margin
-        for (int px = 0; px < kWaveformOverviewWidth; px++) {
-            float amp = dram->waveformOverview[px];
-            if (amp > 1.0f) amp = 1.0f;  // Clamp
-            int h = (int)(amp * halfH);
-            if (h > 0) {
-                // Draw vertical line centered in bar (brightness 6 for subtle look)
-                NT_drawShapeI(kNT_line, 10 + px, barCenterY - h, 10 + px, barCenterY + h, 6);
-            }
-        }
-    }
-
-    // Draw anchor position
+    // Draw wander range (behind everything)
     float anchor = dtc->anchorSmooth;
-    int anchorX = 10 + (int)(anchor * 236);
-    NT_drawShapeI(kNT_line, anchorX, barY - 2, anchorX, barY + barH + 2, 10);  // Anchor line
-
-    // Draw wander range
     float wander = pThis->v[kParamWander] / 100.0f;
     int wanderMinX = 10 + (int)((anchor - wander) * 236);
     int wanderMaxX = 10 + (int)((anchor + wander) * 236);
     wanderMinX = fmaxf(10, wanderMinX);
     wanderMaxX = fminf(246, wanderMaxX);
     NT_drawShapeI(kNT_rectangle, wanderMinX, barY + 1, wanderMaxX, barY + barH - 1, 4);  // Wander zone
+
+    // Draw anchor position
+    int anchorX = 10 + (int)(anchor * 236);
+    NT_drawShapeI(kNT_line, anchorX, barY - 2, anchorX, barY + barH + 2, 10);  // Anchor line
 
     // Draw drifter positions as bright markers extending above and below bar
     for (int d = 0; d < kNumDrifters; d++) {
@@ -1129,6 +1118,20 @@ bool draw(_NT_algorithm* self) {
         NT_drawShapeI(kNT_rectangle, x - 1, barY - 4, x + 2, barY, 15);
         // Draw triangular marker below the bar (pointing up)
         NT_drawShapeI(kNT_rectangle, x - 1, barY + barH, x + 2, barY + barH + 4, 15);
+    }
+
+    // Draw waveform overview on top of everything
+    if (dram->sampleLoaded) {
+        int halfH = barH / 2 - 1;  // Leave 1px margin
+        for (int px = 0; px < kWaveformOverviewWidth; px++) {
+            float amp = dram->waveformOverview[px];
+            if (amp > 1.0f) amp = 1.0f;  // Clamp
+            int h = (int)(amp * halfH);
+            if (h > 0) {
+                // Draw vertical line centered in bar
+                NT_drawShapeI(kNT_line, 10 + px, barCenterY - h, 10 + px, barCenterY + h, 10);
+            }
+        }
     }
 
     // Status line
@@ -1180,13 +1183,14 @@ bool draw(_NT_algorithm* self) {
 //   Pot L: Density (push+turn: Deviation)
 //   Pot C: Anchor (push+turn: Wander)
 //   Pot R: Spectrum (push+turn: Tilt)
-//   Enc L: Gravity
-//   Enc R: Entropy
+//   Enc L: Gravity (press: prev sample)
+//   Enc R: Entropy (press: next sample)
 
 uint32_t hasCustomUi(_NT_algorithm* self) {
-    // Return bitmask of controls we override (including pot buttons for push+turn)
+    // Return bitmask of controls we override
     return kNT_potL | kNT_potC | kNT_potR | kNT_encoderL | kNT_encoderR |
-           kNT_potButtonL | kNT_potButtonC | kNT_potButtonR;
+           kNT_potButtonL | kNT_potButtonC | kNT_potButtonR |
+           kNT_encoderButtonL | kNT_encoderButtonR;
 }
 
 void customUi(_NT_algorithm* self, const _NT_uiData& data) {
@@ -1247,6 +1251,23 @@ void customUi(_NT_algorithm* self, const _NT_uiData& data) {
         if (newVal < 0) newVal = 0;
         if (newVal > 100) newVal = 100;
         NT_setParameterFromUi(algIndex, kParamEntropy + offset, newVal);
+    }
+
+    // Encoder button L: Previous sample (on press)
+    if ((data.controls & kNT_encoderButtonL) && !(data.lastButtons & kNT_encoderButtonL)) {
+        int current = pThis->v[kParamSample];
+        if (current > 0) {
+            NT_setParameterFromUi(algIndex, kParamSample + offset, current - 1);
+        }
+    }
+
+    // Encoder button R: Next sample (on press)
+    if ((data.controls & kNT_encoderButtonR) && !(data.lastButtons & kNT_encoderButtonR)) {
+        int current = pThis->v[kParamSample];
+        int maxSample = pThis->params[kParamSample].max;
+        if (current < maxSample) {
+            NT_setParameterFromUi(algIndex, kParamSample + offset, current + 1);
+        }
     }
 }
 
