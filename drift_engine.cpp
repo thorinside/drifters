@@ -28,18 +28,20 @@
 // ============================================================================
 
 static constexpr int kNumDrifters = 4;
-static constexpr int kMaxGrainsPerDrifter = 8;
+static constexpr int kMaxGrainsPerDrifter = 4;
 static constexpr int kMaxTotalGrains = kNumDrifters * kMaxGrainsPerDrifter;
+static constexpr int kMaxActiveGrains = 8;  // CPU limit - stop rendering beyond this
 static constexpr int kMaxSampleFrames = 48000 * 32;  // 32 seconds at 48kHz
 
-// Reverb constants
-static constexpr int kReverbDelayLines = 8;
-static constexpr int kReverbMaxDelay = 4800;  // 100ms at 48kHz
 
 // Filter bank center frequencies (Hz) - lowest at 250Hz to avoid granular artifacts
 static constexpr float kBandCenterFreqs[kNumDrifters] = { 250.0f, 750.0f, 1550.0f, 4000.0f };
 // Stereo positions for each drifter (-1 to +1)
 static constexpr float kDrifterPan[kNumDrifters] = { -1.0f, -0.5f, 0.5f, 1.0f };
+// Pre-calculated equal-power pan coefficients (avoid trig in inner loop)
+// panL = cos((pan+1) * 0.25 * PI), panR = sin((pan+1) * 0.25 * PI)
+static constexpr float kDrifterPanL[kNumDrifters] = { 1.0f, 0.9239f, 0.3827f, 0.0f };
+static constexpr float kDrifterPanR[kNumDrifters] = { 0.0f, 0.3827f, 0.9239f, 1.0f };
 // Clock phase offsets for each drifter (used for quantized clock mode)
 // static constexpr float kClockPhaseOffset[kNumDrifters] = { 0.0f, 0.25f, 0.5f, 0.75f };
 
@@ -133,57 +135,6 @@ struct Drifter {
     float driftDirection;  // -1 or +1, set once at init
 };
 
-// Reverb delay line
-struct ReverbLine {
-    float buffer[kReverbMaxDelay];
-    int writePos;
-    int delaySamples;
-    float feedback;
-
-    void init(int delay, float fb) {
-        memset(buffer, 0, sizeof(buffer));
-        writePos = 0;
-        delaySamples = delay;
-        feedback = fb;
-    }
-
-    float process(float input) {
-        int readPos = (writePos - delaySamples + kReverbMaxDelay) % kReverbMaxDelay;
-        float output = buffer[readPos];
-        buffer[writePos] = input + output * feedback;
-        writePos = (writePos + 1) % kReverbMaxDelay;
-        return output;
-    }
-};
-
-// Simple reverb
-struct Reverb {
-    ReverbLine lines[kReverbDelayLines];
-    float damping;
-    float dampState;
-
-    void init(float sr) {
-        // Prime number delay times for diffusion
-        int delays[] = { 1557, 1617, 1491, 1422, 1277, 1356, 1188, 1116 };
-        float fb = 0.84f;
-        for (int i = 0; i < kReverbDelayLines; i++) {
-            int d = (int)(delays[i] * sr / 48000.0f);
-            lines[i].init(d, fb);
-        }
-        damping = 0.3f;
-        dampState = 0;
-    }
-
-    float process(float input, float decay) {
-        float sum = 0;
-        for (int i = 0; i < kReverbDelayLines; i++) {
-            lines[i].feedback = 0.7f + decay * 0.25f;
-            sum += lines[i].process(input);
-        }
-        dampState += damping * (sum - dampState);
-        return dampState / kReverbDelayLines;
-    }
-};
 
 // DTC - Performance critical data
 struct _driftEngine_DTC {
@@ -221,8 +172,6 @@ struct _driftEngine_DRAM {
     int32_t sampleLength;      // Current sample length in frames
     bool sampleLoaded;
     bool sampleIsStereo;
-
-    Reverb reverb;
 };
 
 // ============================================================================
@@ -234,6 +183,7 @@ enum {
     kParamOutputL,
     kParamOutputLMode,
     kParamOutputR,
+    kParamOutputRMode,
 
     // CV Inputs
     kParamCvAnchor,
@@ -245,7 +195,9 @@ enum {
 
     // CV Outputs (simulated via audio bus for position/pulse)
     kParamCvOutPosition,
+    kParamCvOutPositionMode,
     kParamCvOutPulse,
+    kParamCvOutPulseMode,
 
     // Sample selection (folder + sample within folder)
     kParamFolder,
@@ -271,7 +223,6 @@ enum {
 
     // Character
     kParamShape,
-    kParamFog,
     kParamEntropy,
 
     kNumParameters
@@ -280,7 +231,7 @@ enum {
 static const _NT_parameter parameters[] = {
     // Audio outputs
     NT_PARAMETER_AUDIO_OUTPUT_WITH_MODE("Out L", 1, 13)
-    NT_PARAMETER_AUDIO_OUTPUT("Out R", 1, 14)
+    NT_PARAMETER_AUDIO_OUTPUT_WITH_MODE("Out R", 1, 14)
 
     // CV inputs
     NT_PARAMETER_CV_INPUT("Anchor CV", 0, 0)
@@ -291,8 +242,8 @@ static const _NT_parameter parameters[] = {
     NT_PARAMETER_CV_INPUT("Clock", 0, 0)
 
     // CV outputs
-    NT_PARAMETER_CV_OUTPUT("Position", 1, 1)
-    NT_PARAMETER_CV_OUTPUT("Pulse", 1, 2)
+    NT_PARAMETER_CV_OUTPUT_WITH_MODE("Position", 1, 1)
+    NT_PARAMETER_CV_OUTPUT_WITH_MODE("Pulse", 1, 2)
 
     // Sample selection - max values updated dynamically when SD card mounts
     { .name = "Folder", .min = 0, .max = 32767, .def = 0, .unit = kNT_unitNone, .scaling = 0, .enumStrings = NULL },
@@ -318,7 +269,6 @@ static const _NT_parameter parameters[] = {
 
     // Character
     { .name = "Shape", .min = 0, .max = kNumShapes - 1, .def = 1, .unit = kNT_unitEnum, .scaling = 0, .enumStrings = shapeNames },
-    { .name = "Fog", .min = 0, .max = 100, .def = 30, .unit = kNT_unitPercent, .scaling = 0, .enumStrings = NULL },
     { .name = "Entropy", .min = 0, .max = 100, .def = 25, .unit = kNT_unitPercent, .scaling = 0, .enumStrings = NULL },
 };
 
@@ -331,10 +281,12 @@ static const uint8_t pagePosition[] = { kParamAnchor, kParamWander, kParamGravit
 static const uint8_t pageDensity[] = { kParamDensity, kParamDeviation };
 static const uint8_t pagePitch[] = { kParamPitch, kParamScatter };
 static const uint8_t pageSpectral[] = { kParamSpectrum, kParamTilt };
-static const uint8_t pageCharacter[] = { kParamShape, kParamFog, kParamEntropy };
-static const uint8_t pageRouting[] = { kParamOutputL, kParamOutputLMode, kParamOutputR };
-static const uint8_t pageCvIn[] = { kParamCvAnchor, kParamCvPitch, kParamCvDrift, kParamCvEntropy, kParamCvStorm, kParamCvClock };
-static const uint8_t pageCvOut[] = { kParamCvOutPosition, kParamCvOutPulse };
+static const uint8_t pageCharacter[] = { kParamShape, kParamEntropy };
+static const uint8_t pageRouting[] = {
+    kParamOutputL, kParamOutputLMode, kParamOutputR, kParamOutputRMode,
+    kParamCvAnchor, kParamCvPitch, kParamCvDrift, kParamCvEntropy, kParamCvStorm, kParamCvClock,
+    kParamCvOutPosition, kParamCvOutPositionMode, kParamCvOutPulse, kParamCvOutPulseMode
+};
 
 static const _NT_parameterPage pages[] = {
     { .name = "Sample", .numParams = ARRAY_SIZE(pageSample), .params = pageSample },
@@ -343,9 +295,7 @@ static const _NT_parameterPage pages[] = {
     { .name = "Pitch", .numParams = ARRAY_SIZE(pagePitch), .params = pagePitch },
     { .name = "Spectral", .numParams = ARRAY_SIZE(pageSpectral), .params = pageSpectral },
     { .name = "Character", .numParams = ARRAY_SIZE(pageCharacter), .params = pageCharacter },
-    { .name = "Outputs", .numParams = ARRAY_SIZE(pageRouting), .params = pageRouting },
-    { .name = "CV In", .numParams = ARRAY_SIZE(pageCvIn), .params = pageCvIn },
-    { .name = "CV Out", .numParams = ARRAY_SIZE(pageCvOut), .params = pageCvOut },
+    { .name = "Routing", .numParams = ARRAY_SIZE(pageRouting), .params = pageRouting },
 };
 
 static const _NT_parameterPages parameterPages = {
@@ -395,7 +345,6 @@ struct _driftEngineAlgorithm : public _NT_algorithm {
     float spectrumSep;     // Filter bank separation
     float tiltAmount;      // Spectral tilt
     GrainShape grainShape;
-    float fogAmount;       // Reverb send
     float entropyTarget;
     float deviationAmount; // Clock deviation
 };
@@ -541,18 +490,19 @@ static float densityToRate(float density) {
 
 // Map density to grain size in seconds
 static float densityToSize(float density) {
-    // 0% -> 0.5s, 100% -> 20ms
-    // Shorter grains at low density = audible gaps between grains
-    return 0.5f * powf(0.04f, density / 100.0f);
+    // 0% -> 0.5s, 100% -> 100ms
+    // Less aggressive size reduction - grains stay longer
+    return 0.5f * powf(0.2f, density / 100.0f);
 }
 
-// Calculate per-drifter volume based on tilt
+// Calculate per-drifter volume based on tilt (linear approximation, avoids powf)
 static float tiltVolume(int drifterIndex, float tilt) {
     // tilt: -1 (dark) to +1 (bright)
     // D1 (bass) gets louder when tilt negative, D4 (air) gets louder when positive
     float normalizedIndex = (float)drifterIndex / (kNumDrifters - 1);  // 0 to 1
     float tiltEffect = (normalizedIndex - 0.5f) * 2.0f * tilt;  // -1 to +1 range
-    return powf(10.0f, tiltEffect * 0.3f);  // ±6dB range
+    // Linear approximation of ±6dB: 1 + 0.5*x gives roughly 0.5 to 1.5 range
+    return 1.0f + tiltEffect * 0.5f;
 }
 
 // ============================================================================
@@ -643,6 +593,12 @@ _NT_algorithm* construct(const _NT_algorithmMemoryPtrs& ptrs,
     dtc->randState = 0x12345678;  // Seed
     dtc->smoothNorm = 1.0f;       // Start at unity gain
 
+    // Initialize smoothed values to defaults (avoid boundary collapse during ramp-up)
+    dtc->anchorSmooth = 0.5f;     // Match default anchor (50%)
+    dtc->driftSmooth = 0.3f;      // Match default drift (30%)
+    dtc->densitySmooth = 8.0f;    // Match densityToRate(50)
+    dtc->entropySmooth = 0.25f;   // Match default entropy (25%)
+
     // Initialize drifters with spread positions
     for (int i = 0; i < kNumDrifters; i++) {
         dtc->drifters[i].position = 0.25f + i * 0.15f;  // Spread across sample
@@ -661,11 +617,8 @@ _NT_algorithm* construct(const _NT_algorithmMemoryPtrs& ptrs,
     dram->sampleLoaded = false;
     dram->sampleIsStereo = false;
 
-    // Initialize reverb
-    float sr = NT_globals.sampleRate;
-    dram->reverb.init(sr);
-
     // Generate a test tone for testing without SD card samples
+    float sr = NT_globals.sampleRate;
     // Creates a 4-second rich harmonic pad sound
     int testLen = (int)(sr * 4);
     dram->sampleLength = testLen;
@@ -717,7 +670,6 @@ _NT_algorithm* construct(const _NT_algorithmMemoryPtrs& ptrs,
     alg->spectrumSep = 0;
     alg->tiltAmount = 0;
     alg->grainShape = kShapeCloud;
-    alg->fogAmount = 0.3f;
     alg->entropyTarget = 0.25f;
     alg->deviationAmount = 1.0f;
 
@@ -782,9 +734,6 @@ void parameterChanged(_NT_algorithm* self, int p) {
         case kParamShape:
             pThis->grainShape = (GrainShape)pThis->v[kParamShape];
             break;
-        case kParamFog:
-            pThis->fogAmount = pThis->v[kParamFog] / 100.0f;
-            break;
         case kParamEntropy:
             pThis->entropyTarget = pThis->v[kParamEntropy] / 100.0f;
             break;
@@ -838,7 +787,8 @@ void step(_NT_algorithm* self, float* busFrames, int numFramesBy4) {
     // Get output busses
     float* outL = busFrames + (pThis->v[kParamOutputL] - 1) * numFrames;
     float* outR = busFrames + (pThis->v[kParamOutputR] - 1) * numFrames;
-    bool replace = pThis->v[kParamOutputLMode];
+    bool replaceL = pThis->v[kParamOutputLMode];
+    bool replaceR = pThis->v[kParamOutputRMode];
 
     // Get CV inputs (only if assigned - value 0 means "None")
     const float* cvAnchor = (pThis->v[kParamCvAnchor] > 0) ? busFrames + (pThis->v[kParamCvAnchor] - 1) * numFrames : NULL;
@@ -848,7 +798,7 @@ void step(_NT_algorithm* self, float* busFrames, int numFramesBy4) {
     const float* cvStorm = (pThis->v[kParamCvStorm] > 0) ? busFrames + (pThis->v[kParamCvStorm] - 1) * numFrames : NULL;
     const float* cvClock = (pThis->v[kParamCvClock] > 0) ? busFrames + (pThis->v[kParamCvClock] - 1) * numFrames : NULL;
 
-    // Get CV outputs
+    // Get CV outputs (mode params exist but we always use replace to avoid accumulation)
     float* cvOutPos = busFrames + (pThis->v[kParamCvOutPosition] - 1) * numFrames;
     float* cvOutPulse = busFrames + (pThis->v[kParamCvOutPulse] - 1) * numFrames;
 
@@ -856,10 +806,8 @@ void step(_NT_algorithm* self, float* busFrames, int numFramesBy4) {
     if (!dram->sampleLoaded || dram->sampleLength < 100) {
         // Output silence
         for (int i = 0; i < numFrames; i++) {
-            if (replace) {
-                outL[i] = 0;
-                outR[i] = 0;
-            }
+            if (replaceL) outL[i] = 0;
+            if (replaceR) outR[i] = 0;
             cvOutPos[i] = 0;
             cvOutPulse[i] = 0;
         }
@@ -895,11 +843,13 @@ void step(_NT_algorithm* self, float* busFrames, int numFramesBy4) {
         dtc->entropySmooth += (effectiveEntropy - dtc->entropySmooth) * smoothRate;
 
         // Clock detection
+        bool clockEdge = false;
         if (clockIn > 1.0f && dtc->prevClock <= 1.0f) {
             // Rising edge
+            clockEdge = true;
             if (dtc->clockReceived) {
                 // Calculate period from last clock
-                dtc->clockPeriod = 1.0f / dtc->clockPhase;  // Period in samples
+                dtc->clockPeriod = 1.0f / dtc->clockPhase;  // Period in seconds
             }
             dtc->clockPhase = 0;
             dtc->clockReceived = true;
@@ -963,24 +913,41 @@ void step(_NT_algorithm* self, float* busFrames, int numFramesBy4) {
 
             avgPos += drifter.position;
 
-            // ====== GRAIN TRIGGERING (Poisson) ======
+            // ====== GRAIN TRIGGERING ======
             drifter.timeSinceGrain += dt;
 
-            if (drifter.timeSinceGrain >= drifter.nextGrainTime) {
+            // Determine if we should trigger a grain
+            bool shouldTrigger = false;
+
+            if (dtc->clockReceived && pThis->deviationAmount < 1.0f) {
+                // Clock sync mode
+                if (pThis->deviationAmount == 0.0f) {
+                    // Pure clock sync: only trigger on clock edges
+                    // Each drifter triggers on clock (could add phase offsets later)
+                    shouldTrigger = clockEdge;
+                } else {
+                    // Blended mode: clock edges always trigger, plus some Poisson triggers
+                    // The lower the deviation, the fewer random triggers
+                    if (clockEdge) {
+                        shouldTrigger = true;
+                    } else if (drifter.timeSinceGrain >= drifter.nextGrainTime) {
+                        // Random trigger with probability based on deviation
+                        shouldTrigger = (randFloat(dtc) < pThis->deviationAmount);
+                    }
+                }
+            } else {
+                // Free-running Poisson mode
+                shouldTrigger = (drifter.timeSinceGrain >= drifter.nextGrainTime);
+            }
+
+            if (shouldTrigger) {
                 // Trigger new grain
                 drifter.timeSinceGrain = 0;
 
-                // Calculate lambda for NEXT grain interval (not every sample)
+                // Calculate lambda for NEXT grain interval
                 float lambda = dtc->densitySmooth;
 
-                // If clock is present and deviation is low, quantize to clock
-                if (dtc->clockReceived && pThis->deviationAmount < 1.0f) {
-                    float clockRate = 1.0f / dtc->clockPeriod;
-                    float blend = 1.0f - pThis->deviationAmount;
-                    lambda = lambda * pThis->deviationAmount + clockRate * blend;
-                }
-
-                // Add entropy-based jitter to rate (only at trigger time, not every sample)
+                // Add entropy-based jitter to rate
                 lambda *= 1.0f + randFloatBipolar(dtc) * entropy * 0.5f;
 
                 drifter.nextGrainTime = randExponential(dtc, lambda);
@@ -1037,6 +1004,9 @@ void step(_NT_algorithm* self, float* busFrames, int numFramesBy4) {
             if (!grain.active) continue;
             activeGrains++;
 
+            // CPU protection: skip rendering if we've hit the limit
+            if (activeGrains > kMaxActiveGrains) continue;
+
             // Read sample with linear interpolation
             int pos0 = (int)grain.position;
             int pos1 = pos0 + 1;
@@ -1050,36 +1020,26 @@ void step(_NT_algorithm* self, float* busFrames, int numFramesBy4) {
 
             // Read from mono buffer (we always load mono, stereo spread comes from panning)
             float sampleMono = dram->sampleBufferL[pos0] * (1 - frac) + dram->sampleBufferL[pos1] * frac;
-            float sampleL = sampleMono;
-            float sampleR = sampleMono;
 
             // Apply grain envelope
             float env = grainEnvelope(grain.phase, grain.shape);
-            sampleL *= env * grain.amplitude;
-            sampleR *= env * grain.amplitude;
+            float sample = sampleMono * env * grain.amplitude;
 
             // Apply filter bank separation (spectrum parameter)
             int d = grain.drifterIndex;
-            float filterFreq = kBandCenterFreqs[d];
-            float filterQ = 1.0f + pThis->spectrumSep * 2.0f;  // Q from 1 to 3
 
             if (pThis->spectrumSep > 0.01f) {
-                sampleL = grain.filterL.process(sampleL, filterFreq, filterQ, sr) * (1.0f + pThis->spectrumSep);
-                sampleR = grain.filterR.process(sampleR, filterFreq, filterQ, sr) * (1.0f + pThis->spectrumSep);
+                float filterFreq = kBandCenterFreqs[d];
+                float filterQ = 1.0f + pThis->spectrumSep * 2.0f;  // Q from 1 to 3
+                sample = grain.filterL.process(sample, filterFreq, filterQ, sr) * (1.0f + pThis->spectrumSep);
             }
 
             // Apply tilt (per-drifter volume)
-            float tiltVol = tiltVolume(d, pThis->tiltAmount);
-            sampleL *= tiltVol;
-            sampleR *= tiltVol;
+            sample *= tiltVolume(d, pThis->tiltAmount);
 
-            // Apply stereo panning
-            float pan = kDrifterPan[d];
-            float panL = cosf((pan + 1) * 0.25f * M_PI);  // Equal power panning
-            float panR = sinf((pan + 1) * 0.25f * M_PI);
-
-            mixL += sampleL * panL;
-            mixR += sampleR * panR;
+            // Apply stereo panning (pre-calculated coefficients)
+            mixL += sample * kDrifterPanL[d];
+            mixR += sample * kDrifterPanR[d];
 
             // Advance grain
             grain.position += grain.positionDelta;
@@ -1103,15 +1063,6 @@ void step(_NT_algorithm* self, float* busFrames, int numFramesBy4) {
         mixL *= dtc->smoothNorm;
         mixR *= dtc->smoothNorm;
 
-        // Apply reverb (fog) - fixed: wet applied only once
-        float dry = 1.0f - pThis->fogAmount * 0.5f;
-        float wet = pThis->fogAmount;
-        float reverbIn = (mixL + mixR) * 0.5f;  // No wet here
-        float reverbOut = dram->reverb.process(reverbIn, pThis->fogAmount);
-
-        mixL = mixL * dry + reverbOut * wet;
-        mixR = mixR * dry + reverbOut * wet;
-
         // Soft clipping with Eurorack-level output (±5V)
         mixL = tanhf(mixL * 2.0f) * 5.0f;
         mixR = tanhf(mixR * 2.0f) * 5.0f;
@@ -1120,16 +1071,13 @@ void step(_NT_algorithm* self, float* busFrames, int numFramesBy4) {
         if (mixL != mixL || mixL > 1e10f || mixL < -1e10f) mixL = 0;
         if (mixR != mixR || mixR > 1e10f || mixR < -1e10f) mixR = 0;
 
-        // Output
-        if (replace) {
-            outL[frame] = mixL;
-            outR[frame] = mixR;
-        } else {
-            outL[frame] += mixL;
-            outR[frame] += mixR;
-        }
+        // Output audio
+        if (replaceL) outL[frame] = mixL;
+        else outL[frame] += mixL;
+        if (replaceR) outR[frame] = mixR;
+        else outR[frame] += mixR;
 
-        // CV outputs
+        // CV outputs (always replace - add mode would accumulate values each frame)
         cvOutPos[frame] = dtc->averagePosition * 5.0f;  // 0-5V
         cvOutPulse[frame] = dtc->pulseOut ? 5.0f : 0;
         dtc->pulseOut = false;
