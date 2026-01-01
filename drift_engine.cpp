@@ -36,8 +36,8 @@ static constexpr int kMaxSampleFrames = 48000 * 32;  // 32 seconds at 48kHz
 static constexpr int kReverbDelayLines = 8;
 static constexpr int kReverbMaxDelay = 4800;  // 100ms at 48kHz
 
-// Filter bank center frequencies (Hz)
-static constexpr float kBandCenterFreqs[kNumDrifters] = { 100.0f, 400.0f, 2000.0f, 8000.0f };
+// Filter bank center frequencies (Hz) - lowest at 250Hz to avoid granular artifacts
+static constexpr float kBandCenterFreqs[kNumDrifters] = { 250.0f, 750.0f, 1550.0f, 4000.0f };
 // Stereo positions for each drifter (-1 to +1)
 static constexpr float kDrifterPan[kNumDrifters] = { -1.0f, -0.5f, 0.5f, 1.0f };
 // Clock phase offsets for each drifter (used for quantized clock mode)
@@ -207,6 +207,9 @@ struct _driftEngine_DTC {
     float averagePosition;
     bool pulseOut;
 
+    // Smoothed normalization factor (anti-click)
+    float smoothNorm;
+
     // Random state
     uint32_t randState;
 };
@@ -374,6 +377,8 @@ struct _driftEngineAlgorithm : public _NT_algorithm {
     _NT_wavRequest wavRequest;
     bool cardMounted;
     bool awaitingCallback;
+    bool initialized;          // Set after construct completes
+    bool pendingSampleLoad;    // Deferred sample load request
     float sampleRateRatio;     // Source sample rate / device sample rate
 
     // Cached values from parameters
@@ -412,6 +417,46 @@ static inline float randFloat(_driftEngine_DTC* dtc) {
     return (float)xorshift32(&dtc->randState) / (float)0xFFFFFFFF;
 }
 
+// Find nearest zero crossing in sample buffer
+static int findNearestZeroCrossing(const float* buffer, int startPos, int sampleLen, int searchRadius = 64) {
+    int bestPos = startPos;
+    float bestVal = fabsf(buffer[startPos % sampleLen]);
+
+    for (int offset = 1; offset <= searchRadius; offset++) {
+        // Search forward
+        int posF = (startPos + offset) % sampleLen;
+        float valF = fabsf(buffer[posF]);
+        if (valF < bestVal) {
+            bestVal = valF;
+            bestPos = posF;
+        }
+        // Also check for actual zero crossing (sign change)
+        if (offset > 0) {
+            int prevF = (startPos + offset - 1) % sampleLen;
+            if (buffer[prevF] * buffer[posF] < 0) {
+                // Zero crossing found
+                return (fabsf(buffer[prevF]) < fabsf(buffer[posF])) ? prevF : posF;
+            }
+        }
+
+        // Search backward
+        int posB = (startPos - offset + sampleLen) % sampleLen;
+        float valB = fabsf(buffer[posB]);
+        if (valB < bestVal) {
+            bestVal = valB;
+            bestPos = posB;
+        }
+        if (offset > 0) {
+            int prevB = (startPos - offset + 1 + sampleLen) % sampleLen;
+            if (buffer[prevB] * buffer[posB] < 0) {
+                return (fabsf(buffer[prevB]) < fabsf(buffer[posB])) ? prevB : posB;
+            }
+        }
+    }
+
+    return bestPos;
+}
+
 // Random float -1 to +1
 static inline float randFloatBipolar(_driftEngine_DTC* dtc) {
     return randFloat(dtc) * 2.0f - 1.0f;
@@ -428,41 +473,58 @@ static inline float randExponential(_driftEngine_DTC* dtc, float lambda) {
 static float grainEnvelope(float phase, GrainShape shape) {
     if (phase < 0 || phase > 1) return 0;
 
+    // Universal safety fade at boundaries (3% fade-in/out for click reduction)
+    float fade = 1.0f;
+    const float fadeLen = 0.03f;
+    if (phase < fadeLen) fade = phase / fadeLen;
+    else if (phase > 1.0f - fadeLen) fade = (1.0f - phase) / fadeLen;
+
+    float env = 1.0f;
     switch (shape) {
         case kShapeMist: {
             // Gaussian-ish: sin^2 approximation
             float x = phase * M_PI;
             float s = sinf(x);
-            return s * s;
+            env = s * s;
+            break;
         }
         case kShapeCloud: {
             // Tukey window (tapered cosine)
             float alpha = 0.5f;
             if (phase < alpha/2) {
-                return 0.5f * (1 - cosf(2*M_PI*phase/alpha));
+                env = 0.5f * (1 - cosf(2*M_PI*phase/alpha));
             } else if (phase > 1 - alpha/2) {
-                return 0.5f * (1 - cosf(2*M_PI*(1-phase)/alpha));
+                env = 0.5f * (1 - cosf(2*M_PI*(1-phase)/alpha));
+            } else {
+                env = 1.0f;
             }
-            return 1.0f;
+            break;
         }
         case kShapeRain:
             // Triangle
-            return phase < 0.5f ? phase * 2 : (1 - phase) * 2;
+            env = phase < 0.5f ? phase * 2 : (1 - phase) * 2;
+            break;
 
-        case kShapeHail:
+        case kShapeHail: {
             // Sharp attack, exponential decay
-            if (phase < 0.1f) return phase * 10;
-            return expf(-4.0f * (phase - 0.1f));
+            if (phase < 0.1f) env = phase * 10;
+            else env = expf(-4.0f * (phase - 0.1f));
+            break;
+        }
 
         case kShapeIce:
             // Near-square with tiny fade
-            if (phase < 0.02f) return phase * 50;
-            if (phase > 0.98f) return (1 - phase) * 50;
-            return 1.0f;
+            if (phase < 0.02f) env = phase * 50;
+            else if (phase > 0.98f) env = (1 - phase) * 50;
+            else env = 1.0f;
+            break;
 
         default:
-            return 1.0f;
+            env = 1.0f;
+            break;
     }
+
+    return env * fade;
 }
 
 // Map density (0-100) to grains per second
@@ -512,10 +574,8 @@ static void wavLoadCallback(void* callbackData, bool success) {
 
 // Helper to initiate sample loading (like sample player example)
 static void loadSample(_driftEngineAlgorithm* pThis) {
-    // Don't try to load if card not mounted
-    if (!NT_isSdCardMounted()) {
-        pThis->dram->sampleLoaded = false;
-        pThis->dram->sampleLength = 0;
+    // Don't try to load during construction or if card not mounted
+    if (!pThis->initialized || !NT_isSdCardMounted()) {
         return;
     }
 
@@ -572,6 +632,7 @@ _NT_algorithm* construct(const _NT_algorithmMemoryPtrs& ptrs,
     // Initialize DTC
     memset(dtc, 0, sizeof(_driftEngine_DTC));
     dtc->randState = 0x12345678;  // Seed
+    dtc->smoothNorm = 1.0f;       // Start at unity gain
 
     // Initialize drifters with spread positions
     for (int i = 0; i < kNumDrifters; i++) {
@@ -629,6 +690,8 @@ _NT_algorithm* construct(const _NT_algorithmMemoryPtrs& ptrs,
     // Initialize WAV loading state
     alg->cardMounted = false;
     alg->awaitingCallback = false;
+    alg->initialized = false;
+    alg->pendingSampleLoad = false;
     alg->sampleRateRatio = 1.0f;
 
     // Initialize cached values
@@ -646,6 +709,9 @@ _NT_algorithm* construct(const _NT_algorithmMemoryPtrs& ptrs,
     alg->fogAmount = 0.3f;
     alg->entropyTarget = 0.25f;
     alg->deviationAmount = 1.0f;
+
+    // Mark as fully initialized
+    alg->initialized = true;
 
     return alg;
 }
@@ -666,10 +732,8 @@ void parameterChanged(_NT_algorithm* self, int p) {
             break;
         }
         case kParamSample:
-            // Load the selected sample (like sample player example)
-            if (!pThis->awaitingCallback) {
-                loadSample(pThis);
-            }
+            // Request sample load (deferred to step() for safety)
+            pThis->pendingSampleLoad = true;
             break;
         case kParamAnchor:
             pThis->anchorTarget = pThis->v[kParamAnchor] / 100.0f;
@@ -735,11 +799,28 @@ void step(_NT_algorithm* self, float* busFrames, int numFramesBy4) {
 #ifdef DISTING_HARDWARE
             NT_updateParameterDefinition(NT_algorithmIndex(self), kParamFolder);
 #endif
+            // Also update sample max for current folder and load the sample
+            _NT_wavFolderInfo folderInfo;
+            NT_getSampleFolderInfo(pThis->v[kParamFolder], folderInfo);
+            pThis->params[kParamSample].max = folderInfo.numSampleFiles - 1;
+#ifdef DISTING_HARDWARE
+            NT_updateParameterDefinition(NT_algorithmIndex(self), kParamSample);
+#endif
+            // Load the current sample
+            if (!pThis->awaitingCallback) {
+                loadSample(pThis);
+            }
         } else {
             // Card unmounted - clear sample
             dram->sampleLoaded = false;
             dram->sampleLength = 0;
         }
+    }
+
+    // Handle deferred sample load requests
+    if (pThis->pendingSampleLoad && !pThis->awaitingCallback) {
+        pThis->pendingSampleLoad = false;
+        loadSample(pThis);
     }
 
     // Get output busses
@@ -830,7 +911,7 @@ void step(_NT_algorithm* self, float* busFrames, int numFramesBy4) {
 
             // Calculate gravity force toward/away from anchor
             float dist = drifter.position - anchor;
-            float gravityAccel = -gravity * dist * 2.0f;  // Toward anchor when positive
+            float gravityAccel = -gravity * dist * 100.0f;  // Toward anchor when positive
 
             // Random walk based on entropy
             float randomWalk = randFloatBipolar(dtc) * entropy * 0.01f;
@@ -897,7 +978,9 @@ void step(_NT_algorithm* self, float* busFrames, int numFramesBy4) {
                     if (!dtc->grains[g].active) {
                         Grain& grain = dtc->grains[g];
                         grain.active = true;
-                        grain.position = drifter.position * sampleLen;
+                        // Snap to nearest zero crossing to reduce clicks (256 samples for low freq content)
+                        int rawPos = (int)(drifter.position * sampleLen);
+                        grain.position = (float)findNearestZeroCrossing(dram->sampleBufferL, rawPos, dram->sampleLength, 256);
                         grain.phase = 0;
                         grain.phaseDelta = 1.0f / pThis->grainSize;
                         grain.drifterIndex = d;
@@ -917,9 +1000,9 @@ void step(_NT_algorithm* self, float* busFrames, int numFramesBy4) {
                         // Include sample rate ratio for proper playback speed
                         grain.positionDelta = powf(2.0f, pitchSemis / 12.0f) * pThis->sampleRateRatio;
 
-                        // Reset filters
-                        grain.filterL.reset();
-                        grain.filterR.reset();
+                        // Don't reset filters - let state carry over to avoid transients
+                        // grain.filterL.reset();
+                        // grain.filterR.reset();
 
                         // Pulse output trigger
                         dtc->pulseOut = true;
@@ -1001,11 +1084,12 @@ void step(_NT_algorithm* self, float* busFrames, int numFramesBy4) {
         }
 
         // Normalize by grain count to prevent saturation (sqrt for density perception)
-        if (activeGrains > 1) {
-            float normFactor = 1.0f / sqrtf((float)activeGrains);
-            mixL *= normFactor;
-            mixR *= normFactor;
-        }
+        // Smooth the normalization factor to prevent clicks from sudden grain count changes
+        float targetNorm = (activeGrains > 1) ? 1.0f / sqrtf((float)activeGrains) : 1.0f;
+        dtc->smoothNorm += 0.001f * (targetNorm - dtc->smoothNorm);  // Very slow smoothing
+        if (dtc->smoothNorm < 0.1f) dtc->smoothNorm = 0.1f;  // Prevent divide issues
+        mixL *= dtc->smoothNorm;
+        mixR *= dtc->smoothNorm;
 
         // Apply reverb (fog) - fixed: wet applied only once
         float dry = 1.0f - pThis->fogAmount * 0.5f;
@@ -1016,13 +1100,9 @@ void step(_NT_algorithm* self, float* busFrames, int numFramesBy4) {
         mixL = mixL * dry + reverbOut * wet;
         mixR = mixR * dry + reverbOut * wet;
 
-        // Output gain (reduced from 8x to prevent constant saturation)
-        mixL *= 3.0f;
-        mixR *= 3.0f;
-
-        // Soft clipping
-        mixL = tanhf(mixL);
-        mixR = tanhf(mixR);
+        // Soft clipping with Eurorack-level output (±5V)
+        mixL = tanhf(mixL * 2.0f) * 5.0f;
+        mixR = tanhf(mixR * 2.0f) * 5.0f;
 
         // NaN/Inf protection
         if (mixL != mixL || mixL > 1e10f || mixL < -1e10f) mixL = 0;
@@ -1136,10 +1216,24 @@ bool draw(_NT_algorithm* self) {
         NT_drawText(200, 48, "STORM", 15, kNT_textLeft, kNT_textTiny);
     }
 
+    // Gravity indicator (bipolar bar: center = 0, left = negative, right = positive)
+    NT_drawText(60, 48, "Grav:", 10, kNT_textLeft, kNT_textTiny);
+    int gravCenterX = 105;
+    int gravHalfWidth = 20;
+    float gravNorm = pThis->gravityForce;  // -1 to +1
+    NT_drawShapeI(kNT_line, gravCenterX, 49, gravCenterX, 53, 8);  // Center mark
+    if (gravNorm > 0.01f) {
+        int gravWidth = (int)(gravNorm * gravHalfWidth);
+        NT_drawShapeI(kNT_rectangle, gravCenterX, 49, gravCenterX + gravWidth, 53, 12);
+    } else if (gravNorm < -0.01f) {
+        int gravWidth = (int)(-gravNorm * gravHalfWidth);
+        NT_drawShapeI(kNT_rectangle, gravCenterX - gravWidth, 49, gravCenterX, 53, 12);
+    }
+
     // Entropy indicator
-    NT_drawText(100, 48, "Entropy:", 10, kNT_textLeft, kNT_textTiny);
-    int entropyWidth = (int)(dtc->entropySmooth * 40);
-    NT_drawShapeI(kNT_rectangle, 145, 49, 145 + entropyWidth, 53, 12);
+    NT_drawText(135, 48, "Ent:", 10, kNT_textLeft, kNT_textTiny);
+    int entropyWidth = (int)(dtc->entropySmooth * 30);
+    NT_drawShapeI(kNT_rectangle, 160, 49, 160 + entropyWidth, 53, 12);
 
     return false;  // Show standard parameter line
 }
@@ -1180,13 +1274,13 @@ void customUi(_NT_algorithm* self, const _NT_uiData& data) {
         NT_setParameterFromUi(algIndex, kParamSpectrum + offset, value);
     }
 
-    // Encoder L (left): Fog - increment/decrement
+    // Encoder L (left): Gravity - increment/decrement
     if (data.encoders[0] != 0) {
-        int current = pThis->v[kParamFog];
+        int current = pThis->v[kParamGravity];
         int newVal = current + data.encoders[0] * 5;  // 5% steps
-        if (newVal < 0) newVal = 0;
+        if (newVal < -100) newVal = -100;
         if (newVal > 100) newVal = 100;
-        NT_setParameterFromUi(algIndex, kParamFog + offset, newVal);
+        NT_setParameterFromUi(algIndex, kParamGravity + offset, newVal);
     }
 
     // Encoder R (right): Entropy - increment/decrement
