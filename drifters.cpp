@@ -63,6 +63,86 @@ static const char* const shapeNames[] = {
     NULL
 };
 
+// Scale definitions for pitch quantization
+struct Scale {
+    const int8_t* notes;
+    uint8_t noteCount;
+};
+
+static const char* const scaleNames[] = {
+    "Chromatic",
+    "Ionian",
+    "Dorian",
+    "Phrygian",
+    "Lydian",
+    "Mixolydian",
+    "Aeolian",
+    "Locrian",
+    "Major b6",
+    "Minor b6",
+    "Lydian #4",
+    "Hungarian",
+    "Persian",
+    "Byzantine",
+    "Enigmatic",
+    "Neapolitan",
+    "Hirajoshi",
+    "Iwato",
+    "Pelog",
+    "Ryo",
+    "Ritsu",
+    "Yo",
+    NULL
+};
+
+static const int8_t scaleChromatic[] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 };
+static const int8_t scaleIonian[] = { 0, 2, 4, 5, 7, 9, 11 };
+static const int8_t scaleDorian[] = { 0, 2, 3, 5, 7, 9, 10 };
+static const int8_t scalePhrygian[] = { 0, 1, 3, 5, 7, 8, 10 };
+static const int8_t scaleLydian[] = { 0, 2, 4, 6, 7, 9, 11 };
+static const int8_t scaleMixolydian[] = { 0, 2, 4, 5, 7, 9, 10 };
+static const int8_t scaleAeolian[] = { 0, 2, 3, 5, 7, 8, 10 };
+static const int8_t scaleLocrian[] = { 0, 1, 3, 5, 6, 8, 10 };
+static const int8_t scaleMajorFlat6[] = { 0, 2, 4, 5, 7, 8, 11 };
+static const int8_t scaleMinorFlat6[] = { 0, 2, 3, 5, 7, 8, 10 };
+static const int8_t scaleLydianSharp4[] = { 0, 2, 4, 6, 7, 9, 10 };
+static const int8_t scaleHungarian[] = { 0, 2, 3, 6, 7, 8, 11 };
+static const int8_t scalePersian[] = { 0, 1, 4, 5, 6, 8, 11 };
+static const int8_t scaleByzantine[] = { 0, 1, 4, 5, 7, 8, 11 };
+static const int8_t scaleEnigmatic[] = { 0, 1, 4, 6, 8, 10, 11 };
+static const int8_t scaleNeapolitan[] = { 0, 1, 3, 5, 7, 8, 11 };
+static const int8_t scaleHirajoshi[] = { 0, 2, 3, 7, 8 };
+static const int8_t scaleIwato[] = { 0, 1, 5, 6, 10 };
+static const int8_t scalePelog[] = { 0, 1, 3, 7, 10 };
+static const int8_t scaleRyo[] = { 0, 2, 4, 7, 9 };
+static const int8_t scaleRitsu[] = { 0, 2, 5, 7, 9 };
+static const int8_t scaleYo[] = { 0, 2, 5, 7, 10 };
+
+static const Scale scales[] = {
+    { scaleChromatic, 12 },
+    { scaleIonian, 7 },
+    { scaleDorian, 7 },
+    { scalePhrygian, 7 },
+    { scaleLydian, 7 },
+    { scaleMixolydian, 7 },
+    { scaleAeolian, 7 },
+    { scaleLocrian, 7 },
+    { scaleMajorFlat6, 7 },
+    { scaleMinorFlat6, 7 },
+    { scaleLydianSharp4, 7 },
+    { scaleHungarian, 7 },
+    { scalePersian, 7 },
+    { scaleByzantine, 7 },
+    { scaleEnigmatic, 7 },
+    { scaleNeapolitan, 7 },
+    { scaleHirajoshi, 5 },
+    { scaleIwato, 5 },
+    { scalePelog, 5 },
+    { scaleRyo, 5 },
+    { scaleRitsu, 5 },
+    { scaleYo, 5 }
+};
+
 // ============================================================================
 // DATA STRUCTURES
 // ============================================================================
