@@ -581,6 +581,70 @@ static float tiltVolume(int drifterIndex, float tilt) {
     return 1.0f + tiltEffect * 0.5f;
 }
 
+// Converts a scale degree to semitones with octave wrapping
+// degree: Scale degree (can be negative or > scale size)
+// scaleIndex: Index into scales[] array (0 = chromatic)
+// Returns: Semitone offset from root
+float degreeToSemitones(int degree, int scaleIndex) {
+    // Chromatic bypass: degrees = semitones
+    if (scaleIndex == 0) {
+        return (float)degree;
+    }
+
+    const Scale& scale = scales[scaleIndex];
+
+    // Calculate which octave we're in and degree within that octave
+    int octave = degree / (int)scale.noteCount;
+    int degreeInOctave = degree % (int)scale.noteCount;
+
+    // Handle negative modulo correctly (C++ % can give negative results)
+    if (degreeInOctave < 0) {
+        degreeInOctave += scale.noteCount;
+        octave -= 1;
+    }
+
+    // Convert to semitones: octaves + scale degree offset
+    return (float)(octave * 12 + scale.notes[degreeInOctave]);
+}
+
+// Quantizes a pitch in semitones to the nearest scale degree
+// semitones: Pitch as semitone offset from root
+// scaleIndex: Index into scales[] array (0 = chromatic)
+// Returns: Quantized semitone value
+float quantizePitchToScale(float semitones, int scaleIndex) {
+    // Chromatic bypass: no quantization
+    if (scaleIndex == 0) {
+        return semitones;
+    }
+
+    const Scale& scale = scales[scaleIndex];
+
+    // Determine which octave and semitone within octave
+    int octave = (int)floorf(semitones / 12.0f);
+    float semisInOctave = semitones - (octave * 12.0f);
+
+    // Handle negative case
+    if (semisInOctave < 0.0f) {
+        semisInOctave += 12.0f;
+        octave -= 1;
+    }
+
+    // Find nearest scale note
+    int nearestIdx = 0;
+    float minDist = fabsf(semisInOctave - scale.notes[0]);
+
+    for (int i = 1; i < scale.noteCount; i++) {
+        float dist = fabsf(semisInOctave - scale.notes[i]);
+        if (dist < minDist) {
+            minDist = dist;
+            nearestIdx = i;
+        }
+    }
+
+    // Convert back to absolute semitones
+    return (float)(octave * 12 + scale.notes[nearestIdx]);
+}
+
 // ============================================================================
 // FACTORY FUNCTIONS
 // ============================================================================
@@ -770,70 +834,6 @@ void parameterChanged(_NT_algorithm* self, int p) {
             break;
         // All other parameters are read directly from pThis->v[] in step()
     }
-}
-
-// Converts a scale degree to semitones with octave wrapping
-// degree: Scale degree (can be negative or > scale size)
-// scaleIndex: Index into scales[] array (0 = chromatic)
-// Returns: Semitone offset from root
-float degreeToSemitones(int degree, int scaleIndex) {
-    // Chromatic bypass: degrees = semitones
-    if (scaleIndex == 0) {
-        return (float)degree;
-    }
-
-    const Scale& scale = scales[scaleIndex];
-
-    // Calculate which octave we're in and degree within that octave
-    int octave = degree / (int)scale.noteCount;
-    int degreeInOctave = degree % (int)scale.noteCount;
-
-    // Handle negative modulo correctly (C++ % can give negative results)
-    if (degreeInOctave < 0) {
-        degreeInOctave += scale.noteCount;
-        octave -= 1;
-    }
-
-    // Convert to semitones: octaves + scale degree offset
-    return (float)(octave * 12 + scale.notes[degreeInOctave]);
-}
-
-// Quantizes a pitch in semitones to the nearest scale degree
-// semitones: Pitch as semitone offset from root
-// scaleIndex: Index into scales[] array (0 = chromatic)
-// Returns: Quantized semitone value
-float quantizePitchToScale(float semitones, int scaleIndex) {
-    // Chromatic bypass: no quantization
-    if (scaleIndex == 0) {
-        return semitones;
-    }
-
-    const Scale& scale = scales[scaleIndex];
-
-    // Determine which octave and semitone within octave
-    int octave = (int)floorf(semitones / 12.0f);
-    float semisInOctave = semitones - (octave * 12.0f);
-
-    // Handle negative case
-    if (semisInOctave < 0.0f) {
-        semisInOctave += 12.0f;
-        octave -= 1;
-    }
-
-    // Find nearest scale note
-    int nearestIdx = 0;
-    float minDist = fabsf(semisInOctave - scale.notes[0]);
-
-    for (int i = 1; i < scale.noteCount; i++) {
-        float dist = fabsf(semisInOctave - scale.notes[i]);
-        if (dist < minDist) {
-            minDist = dist;
-            nearestIdx = i;
-        }
-    }
-
-    // Convert back to absolute semitones
-    return (float)(octave * 12 + scale.notes[nearestIdx]);
 }
 
 void step(_NT_algorithm* self, float* busFrames, int numFramesBy4) {
@@ -1099,15 +1099,34 @@ void step(_NT_algorithm* self, float* busFrames, int numFramesBy4) {
                         grain.shape = (GrainShape)pThis->v[kParamShape];
                         grain.amplitude = 1.0f;  // Base amplitude (soft clipping handles overload)
 
-                        // Calculate pitch
-                        float pitchSemis = (float)pThis->v[kParamPitch] + pitchMod;
-                        // Scatter: D1&D4 get positive, D2&D3 get negative
-                        float scatterDir = (d == 0 || d == 3) ? 1.0f : -1.0f;
-                        float scatterIdx = (d == 0 || d == 3) ? fabsf(d - 1.5f) : fabsf(d - 1.5f);
-                        pitchSemis += (float)pThis->v[kParamScatter] * scatterDir * (scatterIdx / 1.5f);
+                        int scaleIndex = pThis->v[kParamScale];
 
-                        // Add per-grain random pitch based on entropy
-                        pitchSemis += randFloatBipolar(dtc) * entropy * 2.0f;  // ±2 semitones max
+                        float pitchSemis;
+
+                        if (scaleIndex == 0) {
+                            pitchSemis = (float)pThis->v[kParamPitch] + pitchMod;
+
+                            float scatterDir = (d == 0 || d == 3) ? 1.0f : -1.0f;
+                            float scatterMagnitude = (d == 0 || d == 3) ? fabsf(d - 1.5f) : fabsf(d - 1.5f);
+                            pitchSemis += (float)pThis->v[kParamScatter] * scatterDir * (scatterMagnitude / 1.5f);
+
+                            pitchSemis += randFloatBipolar(dtc) * entropy * 2.0f;
+                        } else {
+                            float basePitch = (float)pThis->v[kParamPitch];
+                            if (pitchMod != 0.0f) {
+                                basePitch += quantizePitchToScale(pitchMod, scaleIndex);
+                            }
+
+                            float scatterDir = (d == 0 || d == 3) ? 1.0f : -1.0f;
+                            float scatterMagnitude = (d == 0 || d == 3) ? fabsf(d - 1.5f) : fabsf(d - 1.5f);
+                            int scatterDegrees = (int)roundf((float)pThis->v[kParamScatter] * scatterDir * (scatterMagnitude / 1.5f));
+
+                            float scatterSemis = degreeToSemitones(scatterDegrees, scaleIndex);
+                            pitchSemis = basePitch + scatterSemis;
+
+                            float entropyJitter = randFloatBipolar(dtc) * entropy * 2.0f;
+                            pitchSemis += quantizePitchToScale(entropyJitter, scaleIndex);
+                        }
 
                         // Include sample rate ratio for proper playback speed
                         // Calculate sample rate ratio on the fly (handles NT sample rate changes)
