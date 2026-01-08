@@ -63,7 +63,6 @@ static const char* const shapeNames[] = {
     NULL
 };
 
-// Scale definitions for pitch quantization
 struct Scale {
     const int8_t* notes;
     uint8_t noteCount;
@@ -297,6 +296,7 @@ enum {
     // Pitch controls
     kParamPitch,
     kParamScatter,
+    kParamScale,
 
     // Spectral controls
     kParamSpectrum,
@@ -342,7 +342,8 @@ static const _NT_parameter parameters[] = {
 
     // Pitch
     { .name = "Pitch", .min = -24, .max = 24, .def = 0, .unit = kNT_unitSemitones, .scaling = 0, .enumStrings = NULL },
-    { .name = "Scatter", .min = 0, .max = 12, .def = 0, .unit = kNT_unitSemitones, .scaling = 0, .enumStrings = NULL },
+    { .name = "Scatter", .min = 0, .max = 12, .def = 0, .unit = kNT_unitNone, .scaling = 0, .enumStrings = NULL },
+    { .name = "Scale", .min = 0, .max = 21, .def = 0, .unit = kNT_unitEnum, .scaling = 0, .enumStrings = scaleNames },
 
     // Spectral
     { .name = "Spectrum", .min = 0, .max = 100, .def = 0, .unit = kNT_unitPercent, .scaling = 0, .enumStrings = NULL },
@@ -360,7 +361,7 @@ static const _NT_parameter parameters[] = {
 static const uint8_t pageSample[] = { kParamFolder, kParamSample };
 static const uint8_t pagePosition[] = { kParamAnchor, kParamWander, kParamGravity, kParamDrift };
 static const uint8_t pageDensity[] = { kParamDensity, kParamDeviation };
-static const uint8_t pagePitch[] = { kParamPitch, kParamScatter };
+static const uint8_t pagePitch[] = { kParamPitch, kParamScatter, kParamScale };
 static const uint8_t pageSpectral[] = { kParamSpectrum, kParamTilt };
 static const uint8_t pageCharacter[] = { kParamShape, kParamEntropy };
 static const uint8_t pageRouting[] = {
