@@ -772,6 +772,70 @@ void parameterChanged(_NT_algorithm* self, int p) {
     }
 }
 
+// Converts a scale degree to semitones with octave wrapping
+// degree: Scale degree (can be negative or > scale size)
+// scaleIndex: Index into scales[] array (0 = chromatic)
+// Returns: Semitone offset from root
+float degreeToSemitones(int degree, int scaleIndex) {
+    // Chromatic bypass: degrees = semitones
+    if (scaleIndex == 0) {
+        return (float)degree;
+    }
+
+    const Scale& scale = scales[scaleIndex];
+
+    // Calculate which octave we're in and degree within that octave
+    int octave = degree / (int)scale.noteCount;
+    int degreeInOctave = degree % (int)scale.noteCount;
+
+    // Handle negative modulo correctly (C++ % can give negative results)
+    if (degreeInOctave < 0) {
+        degreeInOctave += scale.noteCount;
+        octave -= 1;
+    }
+
+    // Convert to semitones: octaves + scale degree offset
+    return (float)(octave * 12 + scale.notes[degreeInOctave]);
+}
+
+// Quantizes a pitch in semitones to the nearest scale degree
+// semitones: Pitch as semitone offset from root
+// scaleIndex: Index into scales[] array (0 = chromatic)
+// Returns: Quantized semitone value
+float quantizePitchToScale(float semitones, int scaleIndex) {
+    // Chromatic bypass: no quantization
+    if (scaleIndex == 0) {
+        return semitones;
+    }
+
+    const Scale& scale = scales[scaleIndex];
+
+    // Determine which octave and semitone within octave
+    int octave = (int)floorf(semitones / 12.0f);
+    float semisInOctave = semitones - (octave * 12.0f);
+
+    // Handle negative case
+    if (semisInOctave < 0.0f) {
+        semisInOctave += 12.0f;
+        octave -= 1;
+    }
+
+    // Find nearest scale note
+    int nearestIdx = 0;
+    float minDist = fabsf(semisInOctave - scale.notes[0]);
+
+    for (int i = 1; i < scale.noteCount; i++) {
+        float dist = fabsf(semisInOctave - scale.notes[i]);
+        if (dist < minDist) {
+            minDist = dist;
+            nearestIdx = i;
+        }
+    }
+
+    // Convert back to absolute semitones
+    return (float)(octave * 12 + scale.notes[nearestIdx]);
+}
+
 void step(_NT_algorithm* self, float* busFrames, int numFramesBy4) {
     _driftEngineAlgorithm* pThis = (_driftEngineAlgorithm*)self;
     _driftEngine_DTC* dtc = pThis->dtc;
