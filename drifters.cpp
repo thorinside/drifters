@@ -248,6 +248,11 @@ struct _driftEngine_DTC {
 
     // Random state
     uint32_t randState;
+
+    // Live Mode state
+    int writePointer;      // Circular buffer write position
+    bool frozen;           // Freeze state (write pointer stopped)
+    bool prevLiveMode;     // Previous Live Mode state for crossfade detection
 };
 
 // DRAM - Large sample buffer
@@ -916,7 +921,58 @@ void step(_NT_algorithm* self, float* busFrames, int numFramesBy4) {
     float* cvOutPos = busFrames + (pThis->v[kParamCvOutPosition] - 1) * numFrames;
     float* cvOutPulse = busFrames + (pThis->v[kParamCvOutPulse] - 1) * numFrames;
 
-    // Check if sample loaded
+    // Live Mode parameters
+    bool liveMode = pThis->v[kParamLiveMode] != 0;
+    int inputBus = pThis->v[kParamInputBus];
+    bool freezeGate = pThis->v[kParamFreeze] != 0;
+
+    // Get audio inputs for Live Mode (hardcoded to buses 1 and 2)
+    const float* inputL = NULL;
+    const float* inputR = NULL;
+    if (liveMode && inputBus > 0) {
+        if (inputBus == 1) {
+            // Left only - read from bus 1
+            inputL = busFrames + 0 * numFrames;
+            inputR = inputL;  // Duplicate mono
+        } else if (inputBus == 2) {
+            // Right only - read from bus 2
+            inputL = busFrames + 1 * numFrames;
+            inputR = inputL;  // Duplicate mono
+        } else if (inputBus == 3) {
+            // Stereo - read from buses 1 and 2
+            inputL = busFrames + 0 * numFrames;
+            inputR = busFrames + 1 * numFrames;
+        }
+    }
+
+    // Handle freeze state
+    if (freezeGate && !dtc->frozen) {
+        dtc->frozen = true;
+    } else if (!freezeGate && dtc->frozen) {
+        dtc->frozen = false;
+    }
+
+    // In Live Mode, capture audio to circular buffer
+    if (liveMode && inputBus > 0 && !dtc->frozen) {
+        for (int i = 0; i < numFrames; i++) {
+            // Write to circular buffer with 128-sample safety zone ahead
+            int writePos = dtc->writePointer;
+            dram->sampleBufferL[writePos] = inputL[i];
+            dram->sampleBufferR[writePos] = inputR[i];
+
+            // Advance write pointer
+            dtc->writePointer = (writePos + 1) % kMaxSampleFrames;
+        }
+
+        // In Live Mode, ensure we have valid buffer settings
+        if (!dram->sampleLoaded) {
+            dram->sampleLength = kMaxSampleFrames;
+            dram->sampleLoaded = true;
+            dram->sampleIsStereo = (inputBus == 3);
+        }
+    }
+
+    // Check if sample loaded (or Live Mode active)
     if (!dram->sampleLoaded || dram->sampleLength < 100) {
         // Output silence
         for (int i = 0; i < numFrames; i++) {
@@ -1243,6 +1299,13 @@ void step(_NT_algorithm* self, float* busFrames, int numFramesBy4) {
         if (dtc->smoothNorm < 0.1f) dtc->smoothNorm = 0.1f;  // Prevent divide issues
         mixL *= dtc->smoothNorm;
         mixR *= dtc->smoothNorm;
+
+        // Mix dry input for monitoring in Live Mode (fixed 50% level)
+        if (liveMode && inputL && inputR) {
+            const float dryMix = 0.5f;
+            mixL += inputL[frame] * dryMix;
+            mixR += inputR[frame] * dryMix;
+        }
 
         // Soft clipping with Eurorack-level output (±5V)
         mixL = tanhf(mixL * 2.0f) * 5.0f;
