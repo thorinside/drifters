@@ -602,6 +602,57 @@ static float densityToSize(float density) {
     return 0.5f * powf(0.2f, density / 100.0f);
 }
 
+// Simple autocorrelation pitch detector
+// Returns detected pitch as semitones from A4 (440Hz), or 0 if no clear pitch
+// buffer: audio buffer to analyze
+// startPos: position in buffer to start analysis
+// bufferLen: total buffer length (for wrapping)
+// sampleRate: sample rate in Hz
+static float detectPitch(const float* buffer, int startPos, int bufferLen, float sampleRate) {
+    const int windowSize = 512;  // Analysis window
+    const int minLag = (int)(sampleRate / 2000.0f);  // Max freq ~2000Hz
+    const int maxLag = (int)(sampleRate / 60.0f);    // Min freq ~60Hz
+
+    if (maxLag >= windowSize) return 0.0f;  // Safety check
+
+    float bestCorr = 0.0f;
+    int bestLag = 0;
+
+    // Simple autocorrelation - find lag with highest correlation
+    for (int lag = minLag; lag < maxLag; lag++) {
+        float corr = 0.0f;
+        float energy = 0.0f;
+
+        for (int i = 0; i < windowSize - lag; i++) {
+            int pos1 = (startPos + i) % bufferLen;
+            int pos2 = (startPos + i + lag) % bufferLen;
+            corr += buffer[pos1] * buffer[pos2];
+            energy += buffer[pos1] * buffer[pos1];
+        }
+
+        // Normalize correlation
+        if (energy > 0.0001f) {
+            corr /= energy;
+        }
+
+        if (corr > bestCorr) {
+            bestCorr = corr;
+            bestLag = lag;
+        }
+    }
+
+    // Require reasonable correlation strength
+    if (bestCorr < 0.3f || bestLag == 0) {
+        return 0.0f;  // No clear pitch detected
+    }
+
+    // Convert lag to frequency, then to semitones from A4
+    float freq = sampleRate / (float)bestLag;
+    float semitones = 12.0f * log2f(freq / 440.0f);
+
+    return semitones;
+}
+
 // Calculate per-drifter volume based on tilt (linear approximation, avoids powf)
 static float tiltVolume(int drifterIndex, float tilt) {
     // tilt: -1 (dark) to +1 (bright)
@@ -1235,6 +1286,12 @@ void step(_NT_algorithm* self, float* busFrames, int numFramesBy4) {
 
                         int scaleIndex = pThis->v[kParamScale];
 
+                        // In Live Mode with scale: detect source pitch and quantize to stay in scale
+                        float detectedPitch = 0.0f;
+                        if (liveMode && scaleIndex > 0) {
+                            detectedPitch = detectPitch(dram->sampleBufferL, rawPos, dram->sampleLength, sr);
+                        }
+
                         float pitchSemis;
 
                         if (scaleIndex == 0) {
@@ -1247,6 +1304,13 @@ void step(_NT_algorithm* self, float* busFrames, int numFramesBy4) {
                             pitchSemis += randFloatBipolar(dtc) * entropy * 2.0f;
                         } else {
                             float basePitch = (float)pThis->v[kParamPitch];
+
+                            // In Live Mode: use detected pitch as reference, quantize to scale
+                            if (liveMode && detectedPitch != 0.0f) {
+                                // Quantize detected pitch to scale, use that as base
+                                basePitch += quantizePitchToScale(detectedPitch, scaleIndex) - detectedPitch;
+                            }
+
                             if (pitchMod != 0.0f) {
                                 basePitch += quantizePitchToScale(pitchMod, scaleIndex);
                             }
