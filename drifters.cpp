@@ -1372,21 +1372,24 @@ void step(_NT_algorithm* self, float* busFrames, int numFramesBy4) {
             if (pos0 < 0) pos0 += dram->sampleLength;
             if (pos1 < 0) pos1 += dram->sampleLength;
 
-            // In Live Mode, enforce 128-sample safety zone from write head
+            // In Live Mode, enforce safety zone from write head
             if (liveMode) {
-                const int safetyZone = 128;
+                const int safetyZone = 256;  // Larger zone for safety
                 int writePos = dtc->writePointer;
-                int safeMinPos = (writePos - safetyZone + dram->sampleLength) % dram->sampleLength;
+                int len = dram->sampleLength;
+                int safePos = (writePos - safetyZone * 2 + len) % len;
 
-                // Check if read position is too close to write head
-                // (within safetyZone samples behind or ahead of write pointer)
-                int dist0 = (writePos - pos0 + dram->sampleLength) % dram->sampleLength;
-                if (dist0 < safetyZone) {
-                    pos0 = safeMinPos;
+                // Check distance in BOTH directions (grains can advance past write head)
+                int distBehind0 = (writePos - pos0 + len) % len;
+                int distAhead0 = (pos0 - writePos + len) % len;
+                if (distBehind0 < safetyZone || distAhead0 < safetyZone) {
+                    pos0 = safePos;
                 }
-                int dist1 = (writePos - pos1 + dram->sampleLength) % dram->sampleLength;
-                if (dist1 < safetyZone) {
-                    pos1 = safeMinPos;
+
+                int distBehind1 = (writePos - pos1 + len) % len;
+                int distAhead1 = (pos1 - writePos + len) % len;
+                if (distBehind1 < safetyZone || distAhead1 < safetyZone) {
+                    pos1 = safePos;
                 }
             }
 
