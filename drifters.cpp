@@ -1059,6 +1059,12 @@ void step(_NT_algorithm* self, float* busFrames, int numFramesBy4) {
     if (liveMode != dtc->prevLiveMode) {
         dtc->crossfadeActive = true;
         dtc->crossfadeCounter = 0;
+
+        // When leaving Live Mode (and not frozen), reload the sample
+        if (!liveMode && !dtc->frozen) {
+            pThis->pendingSampleLoad = true;
+        }
+
         dtc->prevLiveMode = liveMode;
     }
 
