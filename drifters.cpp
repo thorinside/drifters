@@ -68,7 +68,7 @@ struct Scale {
     uint8_t noteCount;
 };
 
-static const char* const liveModeNames[] = {
+static const char* const offOnNames[] = {
     "Off",
     "On",
     NULL
@@ -364,9 +364,9 @@ static const _NT_parameter parameters[] = {
     { .name = "Sample", .min = 0, .max = 32767, .def = 0, .unit = kNT_unitNone, .scaling = 0, .enumStrings = NULL },
 
     // Live Mode parameters
-    { .name = "Live Mode", .min = 0, .max = 1, .def = 0, .unit = kNT_unitEnum, .scaling = 0, .enumStrings = liveModeNames },
+    { .name = "Live Mode", .min = 0, .max = 1, .def = 0, .unit = kNT_unitEnum, .scaling = 0, .enumStrings = offOnNames },
     { .name = "Mix", .min = 0, .max = 100, .def = 100, .unit = kNT_unitPercent, .scaling = 0, .enumStrings = NULL },
-    { .name = "Freeze", .min = 0, .max = 1, .def = 0, .unit = kNT_unitNone, .scaling = 0, .enumStrings = NULL },
+    { .name = "Freeze", .min = 0, .max = 1, .def = 0, .unit = kNT_unitEnum, .scaling = 0, .enumStrings = offOnNames },
     NT_PARAMETER_AUDIO_INPUT("Input L", 0, 1)
     NT_PARAMETER_AUDIO_INPUT("Input R", 0, 2)
 
