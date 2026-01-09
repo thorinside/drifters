@@ -40,11 +40,28 @@ The **anchor** is our centre of gravity, our reference point. **Wander** defines
 
 **Drift** is our base walking speed. Some of us are naturally faster (we each have our own variation), and we walk in alternating directions—two of us tend leftward, two rightward—so we don't all pile up on one side.
 
+## Live Mode
+
+Sometimes we don't explore frozen landscapes—we explore *living* ones.
+
+In **Live Mode**, the world writes itself as we walk. Sound flows in from the inputs, a continuous stream becoming terrain beneath our feet. The write head is always at the edge of now, and we drift behind it, exploring the recent past.
+
+**Anchor** becomes delay time—how far back we read from the present moment. **Wander** is still our territory, but now it's measured in time, not samples. We never get too close to the write head; that would be chaos, reading what hasn't been written.
+
+**Freeze** stops the world. The write head pauses, and the landscape becomes fixed—a captured moment we can explore forever, or until we unfreeze and let time flow again.
+
+**Mix** blends our granular voices with the raw input. Full wet and you hear only us. Full dry and you hear only the source. Anywhere between, we harmonize with the present.
+
+When a **Scale** is selected, we listen to the pitch of what we're walking on. We hear the source and tune ourselves to match, quantized to the chosen scale. Notes that make each scale unique—the characteristic tones that differ from major—we favour those, letting each scale's personality shine through.
+
 ## The Parameters (for the Humans)
 
 ### Sample Page
 - **Folder**: Which world to explore
 - **Sample**: Which landscape within it
+- **Live Mode**: Off/On—switch to live audio input
+- **Mix**: Wet/dry balance in Live Mode (0-100%, greyed when not in Live Mode)
+- **Freeze**: Off/On—pause the write head in Live Mode
 
 ### Position Page
 - **Anchor**: Centre of our territory (0-100%)
@@ -59,6 +76,7 @@ The **anchor** is our centre of gravity, our reference point. **Wander** defines
 ### Pitch Page
 - **Pitch**: Transpose everything (-24 to +24 semitones)
 - **Scatter**: How different our individual pitches are (0-12 semitones)
+- **Scale**: Quantize pitches to a scale (Chromatic, Ionian, Dorian, Phrygian, Lydian, Mixolydian, Aeolian, Locrian, and more exotic scales)
 
 ### Spectral Page
 - **Spectrum**: How separated our frequency bands are (0-100%)
@@ -69,6 +87,7 @@ The **anchor** is our centre of gravity, our reference point. **Wander** defines
 - **Entropy**: Chaos amount (0-100%)
 
 ### Routing Page
+- **Input L/R**: Audio inputs for Live Mode (bus selection)
 - Audio outputs (L/R) with replace/add modes
 - CV inputs for modulation (Anchor, Pitch, Drift, Entropy, Storm, Clock)
 - CV outputs (Position, Pulse)
@@ -111,6 +130,12 @@ The screen shows our world:
 - Entropy level
 - Storm indicator (when chaos reigns)
 
+In Live Mode, the display changes:
+- The waveform scrolls left as new audio is captured
+- The write head is fixed at the right edge
+- "LIVE" or "FROZEN" status indicator
+- Drifters shown at their delay positions behind the write head
+
 ## Building
 
 ```bash
@@ -131,4 +156,4 @@ make hardware
 - Plugin ID: ThDr
 - Built with distingNT API v10
 
-*We are four. We drift. We sing. We get bored. We find new ground.*
+*We are four. We drift. We sing. We get bored. We find new ground. And now, we explore the living moment too.*
