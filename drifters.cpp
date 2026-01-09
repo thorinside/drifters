@@ -1246,12 +1246,41 @@ void step(_NT_algorithm* self, float* busFrames, int numFramesBy4) {
             if (pos0 < 0) pos0 += dram->sampleLength;
             if (pos1 < 0) pos1 += dram->sampleLength;
 
-            // Read from mono buffer (we always load mono, stereo spread comes from panning)
-            float sampleMono = dram->sampleBufferL[pos0] * (1 - frac) + dram->sampleBufferL[pos1] * frac;
+            // In Live Mode, enforce 128-sample safety zone from write head
+            if (liveMode) {
+                const int safetyZone = 128;
+                int writePos = dtc->writePointer;
+                int safeMinPos = (writePos - safetyZone + dram->sampleLength) % dram->sampleLength;
+
+                // Check if read position is too close to write head
+                // (within safetyZone samples behind or ahead of write pointer)
+                int dist0 = (writePos - pos0 + dram->sampleLength) % dram->sampleLength;
+                if (dist0 < safetyZone) {
+                    pos0 = safeMinPos;
+                }
+                int dist1 = (writePos - pos1 + dram->sampleLength) % dram->sampleLength;
+                if (dist1 < safetyZone) {
+                    pos1 = safeMinPos;
+                }
+            }
+
+            // Read sample - stereo in Live Mode, mono for sample playback
+            float sampleL, sampleR;
+            if (liveMode && dram->sampleIsStereo) {
+                // True stereo reading from both buffers
+                sampleL = dram->sampleBufferL[pos0] * (1 - frac) + dram->sampleBufferL[pos1] * frac;
+                sampleR = dram->sampleBufferR[pos0] * (1 - frac) + dram->sampleBufferR[pos1] * frac;
+            } else {
+                // Mono reading (existing behavior)
+                float sampleMono = dram->sampleBufferL[pos0] * (1 - frac) + dram->sampleBufferL[pos1] * frac;
+                sampleL = sampleMono;
+                sampleR = sampleMono;
+            }
 
             // Apply grain envelope
             float env = grainEnvelope(grain.phase, grain.shape);
-            float sample = sampleMono * env * grain.amplitude;
+            sampleL *= env * grain.amplitude;
+            sampleR *= env * grain.amplitude;
 
             // Apply filter bank separation (spectrum parameter)
             int d = grain.drifterIndex;
@@ -1260,12 +1289,15 @@ void step(_NT_algorithm* self, float* busFrames, int numFramesBy4) {
             if (spectrumSep > 0.01f) {
                 float filterFreq = kBandCenterFreqs[d];
                 float filterQ = 1.0f + spectrumSep * 2.0f;  // Q from 1 to 3
-                sample = grain.filterL.process(sample, filterFreq, filterQ, sr) * (1.0f + spectrumSep);
+                sampleL = grain.filterL.process(sampleL, filterFreq, filterQ, sr) * (1.0f + spectrumSep);
+                sampleR = grain.filterR.process(sampleR, filterFreq, filterQ, sr) * (1.0f + spectrumSep);
             }
 
             // Apply tilt (per-drifter volume)
             float tiltAmount = pThis->v[kParamTilt] / 100.0f;
-            sample *= tiltVolume(d, tiltAmount);
+            float tiltVol = tiltVolume(d, tiltAmount);
+            sampleL *= tiltVol;
+            sampleR *= tiltVol;
 
             // Apply stereo panning based on drifter position relative to anchor
             // Left of anchor = left pan, right of anchor = right pan
@@ -1275,8 +1307,8 @@ void step(_NT_algorithm* self, float* busFrames, int numFramesBy4) {
             // Linear crossfade panning (cheap, sounds fine for ambient)
             float panL = 0.5f - pan * 0.5f;
             float panR = 0.5f + pan * 0.5f;
-            mixL += sample * panL;
-            mixR += sample * panR;
+            mixL += sampleL * panL + sampleR * (1.0f - panL);
+            mixR += sampleL * (1.0f - panR) + sampleR * panR;
 
             // Advance grain
             grain.position += grain.positionDelta;
