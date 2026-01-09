@@ -1485,6 +1485,11 @@ bool draw(_NT_algorithm* self) {
         NT_drawShapeI(kNT_rectangle, x - 1, barY + barH, x + 2, barY + barH + 4, 15);
     }
 
+    // Update waveform overview in Live Mode (at display refresh rate)
+    if (pThis->v[kParamLiveMode] != 0 && dram->sampleLoaded) {
+        computeWaveformOverview(dram);
+    }
+
     // Draw waveform overview on top of everything
     if (dram->sampleLoaded) {
         int halfH = barH / 2 - 1;  // Leave 1px margin
