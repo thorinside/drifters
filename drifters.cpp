@@ -311,9 +311,10 @@ enum {
 
     // Live Mode parameters
     kParamLiveMode,
+    kParamMix,
+    kParamFreeze,
     kParamInputL,
     kParamInputR,
-    kParamFreeze,
 
     // Position controls
     kParamAnchor,
@@ -364,9 +365,10 @@ static const _NT_parameter parameters[] = {
 
     // Live Mode parameters
     { .name = "Live Mode", .min = 0, .max = 1, .def = 0, .unit = kNT_unitEnum, .scaling = 0, .enumStrings = liveModeNames },
+    { .name = "Mix", .min = 0, .max = 100, .def = 100, .unit = kNT_unitPercent, .scaling = 0, .enumStrings = NULL },
+    { .name = "Freeze", .min = 0, .max = 1, .def = 0, .unit = kNT_unitNone, .scaling = 0, .enumStrings = NULL },
     NT_PARAMETER_AUDIO_INPUT("Input L", 0, 1)
     NT_PARAMETER_AUDIO_INPUT("Input R", 0, 2)
-    { .name = "Freeze", .min = 0, .max = 1, .def = 0, .unit = kNT_unitNone, .scaling = 0, .enumStrings = NULL },
 
     // Position controls
     { .name = "Anchor", .min = 0, .max = 100, .def = 50, .unit = kNT_unitPercent, .scaling = 0, .enumStrings = NULL },
@@ -396,7 +398,7 @@ static const _NT_parameter parameters[] = {
 // PARAMETER PAGES
 // ============================================================================
 
-static const uint8_t pageSample[] = { kParamFolder, kParamSample, kParamLiveMode, kParamFreeze };
+static const uint8_t pageSample[] = { kParamFolder, kParamSample, kParamLiveMode, kParamMix, kParamFreeze };
 static const uint8_t pagePosition[] = { kParamAnchor, kParamWander, kParamGravity, kParamDrift };
 static const uint8_t pageDensity[] = { kParamDensity, kParamDeviation };
 static const uint8_t pagePitch[] = { kParamPitch, kParamScatter, kParamScale };
@@ -948,6 +950,9 @@ _NT_algorithm* construct(const _NT_algorithmMemoryPtrs& ptrs,
     // Mark as fully initialized
     alg->initialized = true;
 
+    // Mix parameter starts greyed out (Live Mode defaults to Off)
+    NT_setParameterGrayedOut(NT_algorithmIndex(alg), kParamMix + NT_parameterOffset(), true);
+
     return alg;
 }
 
@@ -1064,6 +1069,9 @@ void step(_NT_algorithm* self, float* busFrames, int numFramesBy4) {
         if (!liveMode && !dtc->frozen) {
             pThis->pendingSampleLoad = true;
         }
+
+        // Grey out Mix parameter when not in Live Mode
+        NT_setParameterGrayedOut(NT_algorithmIndex(pThis), kParamMix + NT_parameterOffset(), !liveMode);
 
         dtc->prevLiveMode = liveMode;
     }
@@ -1525,11 +1533,12 @@ void step(_NT_algorithm* self, float* busFrames, int numFramesBy4) {
         mixL *= modeGain;
         mixR *= modeGain;
 
-        // Mix dry input for monitoring in Live Mode (fixed 50% level)
+        // In Live Mode: apply wet/dry mix (100% = full wet/grains, 0% = full dry/input)
         if (liveMode && inputL && inputR) {
-            const float dryMix = 0.5f;
-            mixL += inputL[frame] * dryMix;
-            mixR += inputR[frame] * dryMix;
+            float wet = pThis->v[kParamMix] / 100.0f;
+            float dry = 1.0f - wet;
+            mixL = mixL * wet + inputL[frame] * dry;
+            mixR = mixR * wet + inputR[frame] * dry;
         }
 
         // Soft clipping with Eurorack-level output (±5V)
