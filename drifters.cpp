@@ -1209,9 +1209,23 @@ void step(_NT_algorithm* self, float* busFrames, int numFramesBy4) {
                     if (!dtc->grains[g].active) {
                         Grain& grain = dtc->grains[g];
                         grain.active = true;
-                        // Snap to nearest zero crossing to reduce clicks (256 samples for low freq content)
-                        int rawPos = (int)(drifter.position * sampleLen);
-                        grain.position = (float)findNearestZeroCrossing(dram->sampleBufferL, rawPos, dram->sampleLength, 256);
+
+                        // Calculate grain start position
+                        int rawPos;
+                        if (liveMode) {
+                            // In Live Mode: position is relative to write head (behind it)
+                            // This keeps drifters always in the safe "past" area of the buffer
+                            int safeDistance = 256;  // Minimum distance behind write head
+                            int maxDistance = (int)sampleLen - safeDistance * 2;
+                            int offsetBehind = safeDistance + (int)(drifter.position * maxDistance);
+                            rawPos = (dtc->writePointer - offsetBehind + (int)sampleLen) % (int)sampleLen;
+                            // Skip zero-crossing search in Live Mode (buffer constantly changing)
+                            grain.position = (float)rawPos;
+                        } else {
+                            // Sample mode: absolute position with zero-crossing snap
+                            rawPos = (int)(drifter.position * sampleLen);
+                            grain.position = (float)findNearestZeroCrossing(dram->sampleBufferL, rawPos, dram->sampleLength, 256);
+                        }
                         grain.phase = 0;
                         float grainSize = densityToSize((float)pThis->v[kParamDensity]) * sr;
                         grain.phaseDelta = 1.0f / grainSize;
