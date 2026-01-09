@@ -68,6 +68,14 @@ struct Scale {
     uint8_t noteCount;
 };
 
+static const char* const inputBusNames[] = {
+    "None",
+    "Left",
+    "Right",
+    "Stereo",
+    NULL
+};
+
 static const char* const scaleNames[] = {
     "Chromatic",
     "Ionian",
@@ -283,6 +291,11 @@ enum {
     kParamFolder,
     kParamSample,
 
+    // Live Mode parameters
+    kParamLiveMode,
+    kParamInputBus,
+    kParamFreeze,
+
     // Position controls
     kParamAnchor,
     kParamWander,
@@ -330,6 +343,11 @@ static const _NT_parameter parameters[] = {
     { .name = "Folder", .min = 0, .max = 32767, .def = 0, .unit = kNT_unitNone, .scaling = 0, .enumStrings = NULL },
     { .name = "Sample", .min = 0, .max = 32767, .def = 0, .unit = kNT_unitNone, .scaling = 0, .enumStrings = NULL },
 
+    // Live Mode parameters
+    { .name = "Live Mode", .min = 0, .max = 1, .def = 0, .unit = kNT_unitNone, .scaling = 0, .enumStrings = NULL },
+    { .name = "Input", .min = 0, .max = 3, .def = 0, .unit = kNT_unitEnum, .scaling = 0, .enumStrings = inputBusNames },
+    { .name = "Freeze", .min = 0, .max = 1, .def = 0, .unit = kNT_unitNone, .scaling = 0, .enumStrings = NULL },
+
     // Position controls
     { .name = "Anchor", .min = 0, .max = 100, .def = 50, .unit = kNT_unitPercent, .scaling = 0, .enumStrings = NULL },
     { .name = "Wander", .min = 0, .max = 100, .def = 30, .unit = kNT_unitPercent, .scaling = 0, .enumStrings = NULL },
@@ -358,7 +376,7 @@ static const _NT_parameter parameters[] = {
 // PARAMETER PAGES
 // ============================================================================
 
-static const uint8_t pageSample[] = { kParamFolder, kParamSample };
+static const uint8_t pageSample[] = { kParamFolder, kParamSample, kParamLiveMode, kParamInputBus, kParamFreeze };
 static const uint8_t pagePosition[] = { kParamAnchor, kParamWander, kParamGravity, kParamDrift };
 static const uint8_t pageDensity[] = { kParamDensity, kParamDeviation };
 static const uint8_t pagePitch[] = { kParamPitch, kParamScatter, kParamScale };
