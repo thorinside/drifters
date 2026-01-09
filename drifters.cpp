@@ -1372,24 +1372,24 @@ void step(_NT_algorithm* self, float* busFrames, int numFramesBy4) {
             if (pos0 < 0) pos0 += dram->sampleLength;
             if (pos1 < 0) pos1 += dram->sampleLength;
 
-            // In Live Mode, enforce safety zone from write head
+            // In Live Mode, fade out grains approaching the write head
+            float liveProximityFade = 1.0f;
             if (liveMode) {
-                const int safetyZone = 256;  // Larger zone for safety
+                const int dangerZone = 128;   // Hard cutoff
+                const int fadeZone = 512;     // Start fading here
                 int writePos = dtc->writePointer;
                 int len = dram->sampleLength;
-                int safePos = (writePos - safetyZone * 2 + len) % len;
 
-                // Check distance in BOTH directions (grains can advance past write head)
-                int distBehind0 = (writePos - pos0 + len) % len;
-                int distAhead0 = (pos0 - writePos + len) % len;
-                if (distBehind0 < safetyZone || distAhead0 < safetyZone) {
-                    pos0 = safePos;
-                }
+                int distBehind = (writePos - pos0 + len) % len;
+                int distAhead = (pos0 - writePos + len) % len;
+                int minDist = (distBehind < distAhead) ? distBehind : distAhead;
 
-                int distBehind1 = (writePos - pos1 + len) % len;
-                int distAhead1 = (pos1 - writePos + len) % len;
-                if (distBehind1 < safetyZone || distAhead1 < safetyZone) {
-                    pos1 = safePos;
+                if (minDist < dangerZone) {
+                    // Too close - skip this grain entirely
+                    continue;
+                } else if (minDist < fadeZone) {
+                    // In fade zone - smoothly reduce volume
+                    liveProximityFade = (float)(minDist - dangerZone) / (float)(fadeZone - dangerZone);
                 }
             }
 
@@ -1406,8 +1406,8 @@ void step(_NT_algorithm* self, float* busFrames, int numFramesBy4) {
                 sampleR = sampleMono;
             }
 
-            // Apply grain envelope
-            float env = grainEnvelope(grain.phase, grain.shape);
+            // Apply grain envelope (with proximity fade in Live Mode)
+            float env = grainEnvelope(grain.phase, grain.shape) * liveProximityFade;
             sampleL *= env * grain.amplitude;
             sampleR *= env * grain.amplitude;
 
