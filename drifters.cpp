@@ -68,6 +68,12 @@ struct Scale {
     uint8_t noteCount;
 };
 
+static const char* const liveModeNames[] = {
+    "Off",
+    "On",
+    NULL
+};
+
 static const char* const scaleNames[] = {
     "Chromatic",
     "Ionian",
@@ -349,7 +355,7 @@ static const _NT_parameter parameters[] = {
     { .name = "Sample", .min = 0, .max = 32767, .def = 0, .unit = kNT_unitNone, .scaling = 0, .enumStrings = NULL },
 
     // Live Mode parameters
-    { .name = "Live Mode", .min = 0, .max = 1, .def = 0, .unit = kNT_unitNone, .scaling = 0, .enumStrings = NULL },
+    { .name = "Live Mode", .min = 0, .max = 1, .def = 0, .unit = kNT_unitEnum, .scaling = 0, .enumStrings = liveModeNames },
     NT_PARAMETER_AUDIO_INPUT("Input L", 0, 1)
     NT_PARAMETER_AUDIO_INPUT("Input R", 0, 2)
     { .name = "Freeze", .min = 0, .max = 1, .def = 0, .unit = kNT_unitNone, .scaling = 0, .enumStrings = NULL },
