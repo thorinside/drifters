@@ -68,14 +68,6 @@ struct Scale {
     uint8_t noteCount;
 };
 
-static const char* const inputBusNames[] = {
-    "None",
-    "Left",
-    "Right",
-    "Stereo",
-    NULL
-};
-
 static const char* const scaleNames[] = {
     "Chromatic",
     "Ionian",
@@ -305,7 +297,8 @@ enum {
 
     // Live Mode parameters
     kParamLiveMode,
-    kParamInputBus,
+    kParamInputL,
+    kParamInputR,
     kParamFreeze,
 
     // Position controls
@@ -357,7 +350,8 @@ static const _NT_parameter parameters[] = {
 
     // Live Mode parameters
     { .name = "Live Mode", .min = 0, .max = 1, .def = 0, .unit = kNT_unitNone, .scaling = 0, .enumStrings = NULL },
-    { .name = "Input", .min = 0, .max = 3, .def = 0, .unit = kNT_unitEnum, .scaling = 0, .enumStrings = inputBusNames },
+    NT_PARAMETER_AUDIO_INPUT("Input L", 0, 1)
+    NT_PARAMETER_AUDIO_INPUT("Input R", 0, 2)
     { .name = "Freeze", .min = 0, .max = 1, .def = 0, .unit = kNT_unitNone, .scaling = 0, .enumStrings = NULL },
 
     // Position controls
@@ -388,7 +382,7 @@ static const _NT_parameter parameters[] = {
 // PARAMETER PAGES
 // ============================================================================
 
-static const uint8_t pageSample[] = { kParamFolder, kParamSample, kParamLiveMode, kParamInputBus, kParamFreeze };
+static const uint8_t pageSample[] = { kParamFolder, kParamSample, kParamLiveMode, kParamInputL, kParamInputR, kParamFreeze };
 static const uint8_t pagePosition[] = { kParamAnchor, kParamWander, kParamGravity, kParamDrift };
 static const uint8_t pageDensity[] = { kParamDensity, kParamDeviation };
 static const uint8_t pagePitch[] = { kParamPitch, kParamScatter, kParamScale };
@@ -937,27 +931,13 @@ void step(_NT_algorithm* self, float* busFrames, int numFramesBy4) {
 
     // Live Mode parameters
     bool liveMode = pThis->v[kParamLiveMode] != 0;
-    int inputBus = pThis->v[kParamInputBus];
+    int inputBusL = pThis->v[kParamInputL];
+    int inputBusR = pThis->v[kParamInputR];
     bool freezeGate = pThis->v[kParamFreeze] != 0;
 
-    // Get audio inputs for Live Mode (hardcoded to buses 1 and 2)
-    const float* inputL = NULL;
-    const float* inputR = NULL;
-    if (liveMode && inputBus > 0) {
-        if (inputBus == 1) {
-            // Left only - read from bus 1
-            inputL = busFrames + 0 * numFrames;
-            inputR = inputL;  // Duplicate mono
-        } else if (inputBus == 2) {
-            // Right only - read from bus 2
-            inputL = busFrames + 1 * numFrames;
-            inputR = inputL;  // Duplicate mono
-        } else if (inputBus == 3) {
-            // Stereo - read from buses 1 and 2
-            inputL = busFrames + 0 * numFrames;
-            inputR = busFrames + 1 * numFrames;
-        }
-    }
+    // Get audio inputs for Live Mode (user-selected buses)
+    const float* inputL = (inputBusL > 0) ? busFrames + (inputBusL - 1) * numFrames : NULL;
+    const float* inputR = (inputBusR > 0) ? busFrames + (inputBusR - 1) * numFrames : NULL;
 
     // Handle freeze state
     if (freezeGate && !dtc->frozen) {
@@ -1001,12 +981,23 @@ void step(_NT_algorithm* self, float* busFrames, int numFramesBy4) {
     }
 
     // In Live Mode, capture audio to circular buffer
-    if (liveMode && inputBus > 0 && !dtc->frozen) {
+    bool hasInput = (inputL != NULL || inputR != NULL);
+    if (liveMode && hasInput && !dtc->frozen) {
         for (int i = 0; i < numFrames; i++) {
-            // Write to circular buffer with 128-sample safety zone ahead
+            // Write to circular buffer
             int writePos = dtc->writePointer;
-            dram->sampleBufferL[writePos] = inputL[i];
-            dram->sampleBufferR[writePos] = inputR[i];
+
+            // Handle stereo capture (use available input, duplicate if mono)
+            if (inputL && inputR) {
+                dram->sampleBufferL[writePos] = inputL[i];
+                dram->sampleBufferR[writePos] = inputR[i];
+            } else if (inputL) {
+                dram->sampleBufferL[writePos] = inputL[i];
+                dram->sampleBufferR[writePos] = inputL[i];
+            } else {
+                dram->sampleBufferL[writePos] = inputR[i];
+                dram->sampleBufferR[writePos] = inputR[i];
+            }
 
             // Advance write pointer
             dtc->writePointer = (writePos + 1) % kMaxSampleFrames;
@@ -1016,7 +1007,7 @@ void step(_NT_algorithm* self, float* busFrames, int numFramesBy4) {
         if (!dram->sampleLoaded) {
             dram->sampleLength = kMaxSampleFrames;
             dram->sampleLoaded = true;
-            dram->sampleIsStereo = (inputBus == 3);
+            dram->sampleIsStereo = (inputL != NULL && inputR != NULL);
         }
     }
 
