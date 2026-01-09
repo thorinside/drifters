@@ -388,13 +388,14 @@ static const _NT_parameter parameters[] = {
 // PARAMETER PAGES
 // ============================================================================
 
-static const uint8_t pageSample[] = { kParamFolder, kParamSample, kParamLiveMode, kParamInputL, kParamInputR, kParamFreeze };
+static const uint8_t pageSample[] = { kParamFolder, kParamSample, kParamLiveMode, kParamFreeze };
 static const uint8_t pagePosition[] = { kParamAnchor, kParamWander, kParamGravity, kParamDrift };
 static const uint8_t pageDensity[] = { kParamDensity, kParamDeviation };
 static const uint8_t pagePitch[] = { kParamPitch, kParamScatter, kParamScale };
 static const uint8_t pageSpectral[] = { kParamSpectrum, kParamTilt };
 static const uint8_t pageCharacter[] = { kParamShape, kParamEntropy };
 static const uint8_t pageRouting[] = {
+    kParamInputL, kParamInputR,
     kParamOutputL, kParamOutputLMode, kParamOutputR, kParamOutputRMode,
     kParamCvAnchor, kParamCvPitch, kParamCvDrift, kParamCvEntropy, kParamCvStorm, kParamCvClock,
     kParamCvOutPosition, kParamCvOutPositionMode, kParamCvOutPulse, kParamCvOutPulseMode
