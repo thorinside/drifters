@@ -1665,8 +1665,25 @@ bool draw(_NT_algorithm* self) {
     // Draw waveform overview on top of everything
     if (dram->sampleLoaded) {
         int halfH = barH / 2 - 1;  // Leave 1px margin
+
+        // In Live Mode, offset drawing so write head is at right edge
+        // This makes the waveform appear to scroll left as new audio is recorded
+        int writeHeadPixel = 0;
+        if (liveDisplayMode && dram->sampleLength > 0) {
+            writeHeadPixel = (dtc->writePointer * kWaveformOverviewWidth) / dram->sampleLength;
+        }
+
         for (int px = 0; px < kWaveformOverviewWidth; px++) {
-            float amp = dram->waveformOverview[px];
+            int srcPx;
+            if (liveDisplayMode) {
+                // Map so right edge = write head, left edge = oldest
+                // px=235 should read from writeHeadPixel, px=0 should read from oldest
+                srcPx = (writeHeadPixel - (kWaveformOverviewWidth - 1 - px) + kWaveformOverviewWidth) % kWaveformOverviewWidth;
+            } else {
+                srcPx = px;
+            }
+
+            float amp = dram->waveformOverview[srcPx];
             if (amp > 1.0f) amp = 1.0f;  // Clamp
             int h = (int)(amp * halfH);
             if (h > 0) {
