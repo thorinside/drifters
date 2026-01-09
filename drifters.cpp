@@ -1545,51 +1545,64 @@ bool draw(_NT_algorithm* self) {
     int barCenterY = barY + barH / 2;
     NT_drawShapeI(kNT_box, 10, barY, 246, barY + barH, 8);  // Outline
 
-    // Draw wander range (behind everything)
-    float anchor = dtc->anchorSmooth;
-    float wander = pThis->v[kParamWander] / 100.0f;
-    int wanderMinX = 10 + (int)((anchor - wander) * 236);
-    int wanderMaxX = 10 + (int)((anchor + wander) * 236);
-    wanderMinX = fmaxf(10, wanderMinX);
-    wanderMaxX = fminf(246, wanderMaxX);
-    NT_drawShapeI(kNT_rectangle, wanderMinX, barY + 1, wanderMaxX, barY + barH - 1, 4);  // Wander zone
-
-    // Draw anchor position
-    int anchorX = 10 + (int)(anchor * 236);
-    NT_drawShapeI(kNT_line, anchorX, barY - 2, anchorX, barY + barH + 2, 10);  // Anchor line
-
-    // In Live Mode, draw write head position as a distinct bright line
+    // In Live Mode: tape delay style display
+    // Write head at right edge (now), drifters read from the past (left)
     bool liveDisplayMode = pThis->v[kParamLiveMode] != 0;
-    if (liveDisplayMode && dram->sampleLength > 0) {
-        float writeHeadPos = (float)dtc->writePointer / (float)dram->sampleLength;
-        int writeHeadX = 10 + (int)(writeHeadPos * 236);
-        // Draw write head as a bright moving line
+
+    if (liveDisplayMode) {
+        // Draw write head at right edge
+        int writeHeadX = 244;
         NT_drawShapeI(kNT_line, writeHeadX, barY, writeHeadX, barY + barH, 15);
-        // Small arrow indicator at top
         NT_drawShapeI(kNT_rectangle, writeHeadX - 1, barY - 2, writeHeadX + 2, barY, 15);
-    }
 
-    // Draw drifter positions as bright markers extending above and below bar
-    for (int d = 0; d < kNumDrifters; d++) {
-        float drifterDisplayPos;
-        if (liveDisplayMode && dram->sampleLength > 0) {
-            // In Live Mode: show drifters relative to their actual buffer position
-            // Calculate where they're actually reading from
-            int safeDistance = 256;
-            int maxDistance = dram->sampleLength - safeDistance * 2;
-            int offsetBehind = safeDistance + (int)(dtc->drifters[d].position * maxDistance);
-            int actualPos = (dtc->writePointer - offsetBehind + dram->sampleLength) % dram->sampleLength;
-            drifterDisplayPos = (float)actualPos / (float)dram->sampleLength;
-        } else {
-            drifterDisplayPos = dtc->drifters[d].position;
+        // Wander region is behind write head (to the left)
+        // anchor 0 = close to write head, anchor 100 = far back
+        // Invert so higher anchor = further left
+        float anchor = dtc->anchorSmooth;
+        float wander = pThis->v[kParamWander] / 100.0f;
+        float anchorFromRight = anchor;  // 0-1, how far back from write head
+
+        // Map to display: right edge is write head, left is oldest
+        float anchorDisplayPos = 1.0f - anchorFromRight;
+        int anchorX = 10 + (int)(anchorDisplayPos * 234);
+        NT_drawShapeI(kNT_line, anchorX, barY - 2, anchorX, barY + barH + 2, 10);
+
+        // Wander zone around anchor (but never past write head)
+        int wanderMinX = 10 + (int)((anchorDisplayPos - wander) * 234);
+        int wanderMaxX = 10 + (int)((anchorDisplayPos + wander) * 234);
+        wanderMinX = fmaxf(10, wanderMinX);
+        wanderMaxX = fminf(240, wanderMaxX);  // Don't overlap write head
+        NT_drawShapeI(kNT_rectangle, wanderMinX, barY + 1, wanderMaxX, barY + barH - 1, 4);
+
+        // Draw drifters at their positions (relative to write head, shown left of it)
+        for (int d = 0; d < kNumDrifters; d++) {
+            float drifterPos = dtc->drifters[d].position;  // 0-1, how far back
+            float displayPos = 1.0f - drifterPos;  // Invert for display
+            int x = 10 + (int)(displayPos * 234);
+            x = fmaxf(12, fminf(240, x));
+
+            NT_drawShapeI(kNT_rectangle, x - 1, barY - 4, x + 2, barY, 15);
+            NT_drawShapeI(kNT_rectangle, x - 1, barY + barH, x + 2, barY + barH + 4, 15);
         }
-        int x = 10 + (int)(drifterDisplayPos * 236);
-        x = fmaxf(12, fminf(244, x));
+    } else {
+        // Sample mode: original display logic
+        float anchor = dtc->anchorSmooth;
+        float wander = pThis->v[kParamWander] / 100.0f;
+        int wanderMinX = 10 + (int)((anchor - wander) * 236);
+        int wanderMaxX = 10 + (int)((anchor + wander) * 236);
+        wanderMinX = fmaxf(10, wanderMinX);
+        wanderMaxX = fminf(246, wanderMaxX);
+        NT_drawShapeI(kNT_rectangle, wanderMinX, barY + 1, wanderMaxX, barY + barH - 1, 4);
 
-        // Draw triangular marker above the bar (pointing down)
-        NT_drawShapeI(kNT_rectangle, x - 1, barY - 4, x + 2, barY, 15);
-        // Draw triangular marker below the bar (pointing up)
-        NT_drawShapeI(kNT_rectangle, x - 1, barY + barH, x + 2, barY + barH + 4, 15);
+        int anchorX = 10 + (int)(anchor * 236);
+        NT_drawShapeI(kNT_line, anchorX, barY - 2, anchorX, barY + barH + 2, 10);
+
+        for (int d = 0; d < kNumDrifters; d++) {
+            int x = 10 + (int)(dtc->drifters[d].position * 236);
+            x = fmaxf(12, fminf(244, x));
+            NT_drawShapeI(kNT_rectangle, x - 1, barY - 4, x + 2, barY, 15);
+            NT_drawShapeI(kNT_rectangle, x - 1, barY + barH, x + 2, barY + barH + 4, 15);
+        }
     }
 
     // Update waveform overview in Live Mode (at display refresh rate)
