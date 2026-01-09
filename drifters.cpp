@@ -253,6 +253,13 @@ struct _driftEngine_DTC {
     int writePointer;      // Circular buffer write position
     bool frozen;           // Freeze state (write pointer stopped)
     bool prevLiveMode;     // Previous Live Mode state for crossfade detection
+
+    // Crossfade state for mode switching
+    bool crossfadeActive;       // True during mode transition
+    float crossfadeSamples;     // Total crossfade duration in samples (50ms)
+    float crossfadeCounter;     // Current position in crossfade
+    float sampleModeGain;       // Gain for sample mode audio
+    float liveModeGain;         // Gain for live mode audio
 };
 
 // DRAM - Large sample buffer
@@ -785,6 +792,13 @@ _NT_algorithm* construct(const _NT_algorithmMemoryPtrs& ptrs,
     dtc->densitySmooth = 8.0f;    // Match densityToRate(50)
     dtc->entropySmooth = 0.25f;   // Match default entropy (25%)
 
+    // Initialize crossfade state (50ms at 48kHz = 2400 samples)
+    dtc->crossfadeActive = false;
+    dtc->crossfadeSamples = 0.05f * 48000.0f;  // Will be updated with actual sample rate
+    dtc->crossfadeCounter = 0;
+    dtc->sampleModeGain = 1.0f;  // Start with sample mode active
+    dtc->liveModeGain = 0.0f;
+
     // Initialize drifters with spread positions
     for (int i = 0; i < kNumDrifters; i++) {
         dtc->drifters[i].position = 0.25f + i * 0.15f;  // Spread across sample
@@ -950,6 +964,40 @@ void step(_NT_algorithm* self, float* busFrames, int numFramesBy4) {
         dtc->frozen = true;
     } else if (!freezeGate && dtc->frozen) {
         dtc->frozen = false;
+    }
+
+    // Update crossfade duration for actual sample rate
+    dtc->crossfadeSamples = 0.05f * sr;  // 50ms crossfade
+
+    // Detect mode change and start crossfade
+    if (liveMode != dtc->prevLiveMode) {
+        dtc->crossfadeActive = true;
+        dtc->crossfadeCounter = 0;
+        dtc->prevLiveMode = liveMode;
+    }
+
+    // Update crossfade gains (block-rate update for efficiency)
+    if (dtc->crossfadeActive) {
+        float fadeProgress = dtc->crossfadeCounter / dtc->crossfadeSamples;
+        fadeProgress = fminf(fadeProgress, 1.0f);
+
+        if (liveMode) {
+            // Transitioning TO Live Mode: sample fades out, live fades in
+            dtc->sampleModeGain = 1.0f - fadeProgress;
+            dtc->liveModeGain = fadeProgress;
+        } else {
+            // Transitioning FROM Live Mode: live fades out, sample fades in
+            dtc->sampleModeGain = fadeProgress;
+            dtc->liveModeGain = 1.0f - fadeProgress;
+        }
+
+        dtc->crossfadeCounter += numFrames;
+        if (dtc->crossfadeCounter >= dtc->crossfadeSamples) {
+            dtc->crossfadeActive = false;
+            // Set final gains
+            dtc->sampleModeGain = liveMode ? 0.0f : 1.0f;
+            dtc->liveModeGain = liveMode ? 1.0f : 0.0f;
+        }
     }
 
     // In Live Mode, capture audio to circular buffer
@@ -1332,6 +1380,12 @@ void step(_NT_algorithm* self, float* busFrames, int numFramesBy4) {
         mixL *= dtc->smoothNorm;
         mixR *= dtc->smoothNorm;
 
+        // Apply mode crossfade gain during transitions
+        // Use the gain for the current mode (smooth fade during switch)
+        float modeGain = liveMode ? dtc->liveModeGain : dtc->sampleModeGain;
+        mixL *= modeGain;
+        mixR *= modeGain;
+
         // Mix dry input for monitoring in Live Mode (fixed 50% level)
         if (liveMode && inputL && inputR) {
             const float dryMix = 0.5f;
@@ -1460,8 +1514,16 @@ bool draw(_NT_algorithm* self) {
     NT_intToString(statusLine, activeGrains);
     NT_drawText(45, 48, statusLine, 12, kNT_textLeft, kNT_textTiny);
 
-    // Show storm indicator if active
-    if (dtc->stormLevel > 0.01f) {
+    // Show Live Mode status indicators
+    bool liveMode = pThis->v[kParamLiveMode] != 0;
+    if (liveMode) {
+        if (dtc->frozen) {
+            NT_drawText(200, 48, "FROZEN", 15, kNT_textLeft, kNT_textTiny);
+        } else {
+            NT_drawText(200, 48, "LIVE", 12, kNT_textLeft, kNT_textTiny);
+        }
+    } else if (dtc->stormLevel > 0.01f) {
+        // Show storm indicator only when not in Live Mode
         int stormWidth = (int)(dtc->stormLevel * 40);
         NT_drawShapeI(kNT_rectangle, 200, 48, 200 + stormWidth, 52, 15);
         NT_drawText(200, 48, "STORM", 15, kNT_textLeft, kNT_textTiny);
