@@ -1558,9 +1558,32 @@ bool draw(_NT_algorithm* self) {
     int anchorX = 10 + (int)(anchor * 236);
     NT_drawShapeI(kNT_line, anchorX, barY - 2, anchorX, barY + barH + 2, 10);  // Anchor line
 
+    // In Live Mode, draw write head position as a distinct bright line
+    bool liveDisplayMode = pThis->v[kParamLiveMode] != 0;
+    if (liveDisplayMode && dram->sampleLength > 0) {
+        float writeHeadPos = (float)dtc->writePointer / (float)dram->sampleLength;
+        int writeHeadX = 10 + (int)(writeHeadPos * 236);
+        // Draw write head as a bright moving line
+        NT_drawShapeI(kNT_line, writeHeadX, barY, writeHeadX, barY + barH, 15);
+        // Small arrow indicator at top
+        NT_drawShapeI(kNT_rectangle, writeHeadX - 1, barY - 2, writeHeadX + 2, barY, 15);
+    }
+
     // Draw drifter positions as bright markers extending above and below bar
     for (int d = 0; d < kNumDrifters; d++) {
-        int x = 10 + (int)(dtc->drifters[d].position * 236);
+        float drifterDisplayPos;
+        if (liveDisplayMode && dram->sampleLength > 0) {
+            // In Live Mode: show drifters relative to their actual buffer position
+            // Calculate where they're actually reading from
+            int safeDistance = 256;
+            int maxDistance = dram->sampleLength - safeDistance * 2;
+            int offsetBehind = safeDistance + (int)(dtc->drifters[d].position * maxDistance);
+            int actualPos = (dtc->writePointer - offsetBehind + dram->sampleLength) % dram->sampleLength;
+            drifterDisplayPos = (float)actualPos / (float)dram->sampleLength;
+        } else {
+            drifterDisplayPos = dtc->drifters[d].position;
+        }
+        int x = 10 + (int)(drifterDisplayPos * 236);
         x = fmaxf(12, fminf(244, x));
 
         // Draw triangular marker above the bar (pointing down)
