@@ -647,8 +647,10 @@ static float detectPitch(const float* buffer, int startPos, int bufferLen, float
     }
 
     // Convert lag to frequency, then to semitones from A4
+    // Use log() instead of log2f() - C++ overload inlines to builtin
+    // log2(x) = log(x) / log(2) = log(x) * 1.4427f
     float freq = sampleRate / (float)bestLag;
-    float semitones = 12.0f * log2f(freq / 440.0f);
+    float semitones = 12.0f * log(freq / 440.0f) * 1.4427f;
 
     return semitones;
 }
