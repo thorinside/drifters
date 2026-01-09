@@ -148,6 +148,14 @@ static const Scale scales[] = {
     { scaleYo, 5 }
 };
 
+// Check if a semitone is in the major scale
+static bool isInMajorScale(int8_t semitone) {
+    // Major scale semitones: 0, 2, 4, 5, 7, 9, 11
+    semitone = ((semitone % 12) + 12) % 12;  // Normalize to 0-11
+    return semitone == 0 || semitone == 2 || semitone == 4 ||
+           semitone == 5 || semitone == 7 || semitone == 9 || semitone == 11;
+}
+
 // ============================================================================
 // DATA STRUCTURES
 // ============================================================================
@@ -528,6 +536,44 @@ static inline float randExponential(_driftEngine_DTC* dtc, float lambda) {
     float u = randFloat(dtc);
     if (u < 0.0001f) u = 0.0001f;  // Avoid log(0)
     return -logf(u) / lambda;
+}
+
+// Get a random scale degree, biased toward characteristic notes (those not in major)
+// Returns a degree offset (can be negative or positive)
+static int getCharacteristicDegree(_driftEngine_DTC* dtc, int scaleIndex, int maxDegrees) {
+    if (scaleIndex <= 1) {  // Chromatic or Ionian - no bias needed
+        return (int)(randFloat(dtc) * (maxDegrees * 2 + 1)) - maxDegrees;
+    }
+
+    const Scale& scale = scales[scaleIndex];
+
+    // Try up to 4 times to find a characteristic note
+    for (int attempt = 0; attempt < 4; attempt++) {
+        int degree = (int)(randFloat(dtc) * (maxDegrees * 2 + 1)) - maxDegrees;
+
+        // Get the semitone for this degree
+        int octave = degree / (int)scale.noteCount;
+        int degreeInOctave = degree % (int)scale.noteCount;
+        if (degreeInOctave < 0) {
+            degreeInOctave += scale.noteCount;
+            octave -= 1;
+        }
+        int8_t semitone = scale.notes[degreeInOctave];
+
+        // If this note is NOT in major scale, prefer it (70% chance to keep)
+        if (!isInMajorScale(semitone)) {
+            if (randFloat(dtc) < 0.7f) {
+                return degree;
+            }
+        }
+        // If in major scale, only 30% chance to keep, otherwise try again
+        if (randFloat(dtc) < 0.3f) {
+            return degree;
+        }
+    }
+
+    // Fallback: return last attempted degree
+    return (int)(randFloat(dtc) * (maxDegrees * 2 + 1)) - maxDegrees;
 }
 
 // Compute grain envelope value
@@ -1324,8 +1370,14 @@ void step(_NT_algorithm* self, float* busFrames, int numFramesBy4) {
                             float scatterSemis = degreeToSemitones(scatterDegrees, scaleIndex);
                             pitchSemis = basePitch + scatterSemis;
 
-                            float entropyJitter = randFloatBipolar(dtc) * entropy * 2.0f;
-                            pitchSemis += quantizePitchToScale(entropyJitter, scaleIndex);
+                            // Entropy adds random scale degrees, biased toward characteristic notes
+                            if (entropy > 0.01f) {
+                                int maxDegrees = (int)(entropy * 4.0f);  // 0-4 degrees based on entropy
+                                if (maxDegrees > 0) {
+                                    int jitterDegree = getCharacteristicDegree(dtc, scaleIndex, maxDegrees);
+                                    pitchSemis += degreeToSemitones(jitterDegree, scaleIndex);
+                                }
+                            }
                         }
 
                         // Include sample rate ratio for proper playback speed
