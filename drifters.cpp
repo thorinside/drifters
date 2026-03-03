@@ -412,13 +412,13 @@ static const uint8_t pageRouting[] = {
 };
 
 static const _NT_parameterPage pages[] = {
-    { .name = "Sample", .numParams = ARRAY_SIZE(pageSample), .params = pageSample },
-    { .name = "Position", .numParams = ARRAY_SIZE(pagePosition), .params = pagePosition },
-    { .name = "Density", .numParams = ARRAY_SIZE(pageDensity), .params = pageDensity },
-    { .name = "Pitch", .numParams = ARRAY_SIZE(pagePitch), .params = pagePitch },
-    { .name = "Spectral", .numParams = ARRAY_SIZE(pageSpectral), .params = pageSpectral },
-    { .name = "Character", .numParams = ARRAY_SIZE(pageCharacter), .params = pageCharacter },
-    { .name = "Routing", .numParams = ARRAY_SIZE(pageRouting), .params = pageRouting },
+    { .name = "Sample", .numParams = ARRAY_SIZE(pageSample), .group = 0, .unused = {}, .params = pageSample },
+    { .name = "Position", .numParams = ARRAY_SIZE(pagePosition), .group = 0, .unused = {}, .params = pagePosition },
+    { .name = "Density", .numParams = ARRAY_SIZE(pageDensity), .group = 0, .unused = {}, .params = pageDensity },
+    { .name = "Pitch", .numParams = ARRAY_SIZE(pagePitch), .group = 0, .unused = {}, .params = pagePitch },
+    { .name = "Spectral", .numParams = ARRAY_SIZE(pageSpectral), .group = 0, .unused = {}, .params = pageSpectral },
+    { .name = "Character", .numParams = ARRAY_SIZE(pageCharacter), .group = 0, .unused = {}, .params = pageCharacter },
+    { .name = "Routing", .numParams = ARRAY_SIZE(pageRouting), .group = 0, .unused = {}, .params = pageRouting },
 };
 
 static const _NT_parameterPages parameterPages = {
